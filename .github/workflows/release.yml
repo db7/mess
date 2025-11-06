@@ -1,0 +1,66 @@
+name: Release Packages
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Determine version from tag
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          if [ -z "$version" ]; then
+            echo "Unable to derive version from tag '$tag'" >&2
+            exit 1
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+      - name: Update Makefile version
+        run: |
+          perl -pi -e 's/^VERSION=\t.*/VERSION=\t'"${{ steps.version.outputs.version }}"'/' Makefile
+          grep '^VERSION=' Makefile
+
+      - name: Build project
+        run: |
+          make clean
+          make
+
+      - name: Stage installation tree
+        run: |
+          rm -rf dist
+          make install DESTDIR=dist/staging
+          version='${{ steps.version.outputs.version }}'
+          mkdir -p "dist/mess-$version"
+          cp -R dist/staging/usr/local/* "dist/mess-$version"/
+
+      - name: Create archives
+        run: |
+          version='${{ steps.version.outputs.version }}'
+          tar -C dist -czf "mess-$version.tar.gz" "mess-$version"
+          (cd dist && zip -r "../mess-$version.zip" "mess-$version")
+
+      - name: Upload tarball
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: mess-${{ steps.version.outputs.version }}.tar.gz
+          asset_name: mess-${{ steps.version.outputs.version }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload zip
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: mess-${{ steps.version.outputs.version }}.zip
+          asset_name: mess-${{ steps.version.outputs.version }}.zip
+          asset_content_type: application/zip

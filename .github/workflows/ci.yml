@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          export CC=${{ matrix.cc }}
+          make
+
+      - name: Run tests
+        run: |
+          export CC=${{ matrix.cc }}
+          make test
+
+  alpine:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/open-s4c/dice/alpine-ci:latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: apk add --no-cache build-base util-linux-dev
+
+      - name: Build
+        run: make
+
+      - name: Run tests
+        run: make test

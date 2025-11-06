@@ -1,0 +1,34 @@
+name: NetBSD (smolBSD)
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  smolbsd:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/open-s4c/dice/smolbsd-ci:latest
+      options: --privileged
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Copy smolBSD helpers
+        run: cp -r scripts /data
+
+      - name: Inject workspace into image
+        run: |
+          cd /data
+          scripts/smolbsd/add2img.sh smolBSD/smolbsd.img "$GITHUB_WORKSPACE"
+
+      - name: Boot smolBSD and run tests
+        run: |
+          cd /data/smolBSD
+          ./startnb.sh -k netbsd-SMOL -i smolbsd.img -m 2048 -x "-no-reboot"
+
+      - name: Collect results
+        run: |
+          cd /data
+          scripts/smolbsd/get_results.sh smolBSD/smolbsd.img
