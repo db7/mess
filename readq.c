@@ -1,24 +1,27 @@
 #include "readq.h"
+
 #include <assert.h>
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 
-// Initialize the readq
+// Initialize the queue descriptor used for PTY reads.
 void
-init_queue(readq *queue, int fd)
+readq_init(struct readq *queue, int fd)
 {
-    queue->start = 0;
-    queue->end = 0;
-    queue->fd = fd;
+    queue->start      = 0;
+    queue->end        = 0;
+    queue->last_start = 0;
+    queue->last_len   = 0;
+    queue->fd         = fd;
 }
 
 // Refill the buffer from the file descriptor
 bool
-refill_queue(readq *queue)
+readq_refill(struct readq *queue)
 {
     const ssize_t capacity = READQ_SIZE - 1;
-    ssize_t nread = queue->end - queue->start;
+    ssize_t nread          = queue->end - queue->start;
     assert(nread >= 0);
 
     if (queue->start > 0) {
@@ -26,10 +29,12 @@ refill_queue(readq *queue)
         memmove(queue->buffer, queue->buffer + queue->start, nread);
 
         // Update buffer pointers
-        queue->start = 0;
-        queue->end = nread;
+        queue->start              = 0;
+        queue->end                = nread;
         queue->buffer[queue->end] = '\0';
     }
+
+    queue->last_len = 0;
 
     if (nread == capacity)
         return false;
@@ -39,6 +44,8 @@ refill_queue(readq *queue)
     if (nread <= 0)
         return false;
 
+    queue->last_start = queue->end;
+    queue->last_len   = (size_t)nread;
     queue->end += nread;
     queue->buffer[queue->end] = '\0';
     return true;
@@ -47,11 +54,11 @@ refill_queue(readq *queue)
 // Get the current byte from the buffer
 // Returns -1 if no more data is available and the buffer can't be refilled
 int
-pick_byte(readq *queue)
+readq_pick_byte(struct readq *queue)
 {
     if (queue->start >= queue->end) {
         // Buffer is empty, try to refill it
-        if (1 || !refill_queue(queue)) {
+        if (1 || !readq_refill(queue)) {
             return -1; // No more data available
         }
     }
@@ -63,9 +70,9 @@ pick_byte(readq *queue)
 // Get the next byte from the buffer
 // Returns -1 if no more data is available and the buffer can't be refilled
 int
-get_next_byte(readq *queue)
+readq_get_next(struct readq *queue)
 {
-    int b = pick_byte(queue);
+    int b = readq_pick_byte(queue);
     if (b != -1)
         queue->start++;
     return b;
@@ -73,8 +80,30 @@ get_next_byte(readq *queue)
 
 // Check if the queue is empty and cannot be refilled
 bool
-is_empty(readq *queue)
+readq_is_empty(struct readq *queue)
 {
     // If no unread data and refill fails, the queue is empty
-    return pick_byte(queue) == -1;
+    return readq_pick_byte(queue) == -1;
+}
+
+const char *
+readq_last_ptr(const struct readq *queue)
+{
+    if (queue->last_len == 0)
+        return NULL;
+    return queue->buffer + queue->last_start;
+}
+
+size_t
+readq_last_len(const struct readq *queue)
+{
+    return queue->last_len;
+}
+
+size_t
+readq_available_bytes(const struct readq *queue)
+{
+    if (!queue)
+        return 0;
+    return (queue->end >= queue->start) ? (queue->end - queue->start) : 0;
 }

@@ -1,5 +1,6 @@
 #include "nav.h"
 #include "readq.h"
+
 #include <fcntl.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -14,10 +15,10 @@ main(int argc, char *argv[])
 
     int fp = open(argv[1], O_RDONLY);
 
-    readq bq;
-    init_queue(&bq, fp);
+    struct readq bq;
+    readq_init(&bq, fp);
 
-    while (refill_queue(&bq)) {
+    while (readq_refill(&bq)) {
         printf("buffer: %s\n", bq.buffer);
         process_output(&bq);
     }

@@ -1,9 +1,10 @@
-#ifndef NAV_H
-#define NAV_H
 /*******************************************************************************
  * navigation interface
  ******************************************************************************/
+#ifndef NAV_H
+#define NAV_H
 #include "readq.h"
+
 #include <stdbool.h>
 #include <sys/types.h>
 
@@ -11,7 +12,7 @@
 #define MAX_URLS 10
 
 // Extract USC8 links from pager output, keeping URLs stored in internal state.
-ssize_t process_output(readq *bq);
+ssize_t process_output(struct readq *bq);
 
 // Look for navigation commands in the input string. Returns whether the string
 // should be forwarded to the pager.

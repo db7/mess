@@ -1,5 +1,6 @@
 #include "nav.h"
 #include "readq.h"
+
 #include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -14,7 +15,7 @@ typedef struct {
 } OSC8Pair;
 
 // Global variables
-int url_count = 0;
+int url_count    = 0;
 int selected_url = -1;   // Tracks the currently selected URL index
 OSC8Pair urls[MAX_URLS]; // Array to store OSC 8 URLs
 int offset = 0;
@@ -83,16 +84,16 @@ handle_key_input(char key)
 OSC8Pair extract_osc8(const char *input);
 
 ssize_t
-process_output(readq *bq)
+process_output(struct readq *bq)
 {
     const char *osc8_start = "\e]8";
-    const char *osc8_end = "\e]8;;\e\\";
+    const char *osc8_end   = "\e]8;;\e\\";
     // int it = 0;
     while (bq->start != bq->end) {
         assert(bq->start < bq->end);
         const size_t left = bq->end - bq->start;
-        const char *str = (const char *)bq->buffer + bq->start;
-        const char *end = (const char *)bq->buffer + bq->end;
+        const char *str   = (const char *)bq->buffer + bq->start;
+        const char *end   = (const char *)bq->buffer + bq->end;
 
         // if it has no further OSC8 start, then consume to the end of buffer
         // actually should consider \e alone
@@ -143,10 +144,10 @@ process_output(readq *bq)
 OSC8Pair
 extract_osc8(const char *input)
 {
-    const char *osc8_start = "\e]8;";
-    const char *osc8_end = "\e]8;;\e\\";
+    const char *osc8_start    = "\e]8;";
+    const char *osc8_end      = "\e]8;;\e\\";
     const char *osc8_link_end = "\e\\";
-    OSC8Pair result = {NULL, NULL};
+    OSC8Pair result           = {NULL, NULL};
 
     // Find the start of the OSC 8 sequence
     const char *link_start = strstr(input, osc8_start);
@@ -166,7 +167,7 @@ extract_osc8(const char *input)
 
     // Extract the link
     size_t link_length = link_end - link_start;
-    result.link = malloc(link_length + 1);
+    result.link        = malloc(link_length + 1);
     if (!result.link) {
         perror("malloc failed");
         exit(EXIT_FAILURE);
@@ -176,13 +177,13 @@ extract_osc8(const char *input)
 
     // Find the end of the displayed text
     const char *text_start = link_end + strlen(osc8_link_end);
-    const char *text_end = strstr(text_start, osc8_end);
+    const char *text_end   = strstr(text_start, osc8_end);
     if (text_end == NULL)
         return result;
 
     // Extract the text
     size_t text_length = text_end - text_start;
-    result.text = malloc(text_length + 1);
+    result.text        = malloc(text_length + 1);
     if (!result.text) {
         perror("malloc failed");
         free(result.link);

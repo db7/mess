@@ -1,33 +1,29 @@
 #ifndef READQ_H
 #define READQ_H
+
 #include <stdbool.h>
-#include <unistd.h>
+#include <stddef.h>
 
-// Define the buffer size and refill threshold
-#define READQ_SIZE 1024
+#ifndef READQ_SIZE
+#define READQ_SIZE 4096
+#endif
 
-// Structure to manage the buffer/queue
-typedef struct {
-    char buffer[READQ_SIZE + 1]; // The buffer to hold data
-    size_t start;                   // Start index of unread data
-    size_t end;                     // End index of unread data
-    int fd;                         // File descriptor to read from
-} readq;
+struct readq {
+    char buffer[READQ_SIZE + 1];
+    size_t start;
+    size_t end;
+    size_t last_start;
+    size_t last_len;
+    int fd;
+};
 
-// Initialize the readq
-void init_queue(readq *queue, int fd);
+void readq_init(struct readq *queue, int fd);
+bool readq_refill(struct readq *queue);
+int readq_pick_byte(struct readq *queue);
+int readq_get_next(struct readq *queue);
+bool readq_is_empty(struct readq *queue);
+const char *readq_last_read_ptr(const struct readq *queue);
+size_t readq_last_read_len(const struct readq *queue);
+size_t readq_available_bytes(const struct readq *queue);
 
-// Refill the buffer from the file descriptor
-// return false when EOF or empty
-bool refill_queue(readq *queue);
-
-// Get the next byte from the buffer
-// Returns -1 if no more data is available and the buffer can't be refilled
-int pick_byte(readq *queue);
-
-int get_next_byte(readq *queue);
-
-// Check if the queue is empty and cannot be refilled
-bool is_empty(readq *queue);
-
-#endif // READQ_H
+#endif /* READQ_H */

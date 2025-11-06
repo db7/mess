@@ -1,5 +1,6 @@
 #include "nav.h"
 #include "readq.h"
+
 #include <assert.h>
 #include <fcntl.h>
 #include <regex.h>
@@ -42,21 +43,22 @@ set_raw_mode(int fd)
         exit(EXIT_FAILURE);
     }
     prev_term = term;
-    set_term = true;
+    set_term  = true;
 
     // Save the original settings (for restoring later)
     // struct termios orig_term = term;
 
     // Set the terminal to raw mode
     // term.c_lflag &=
-    //     ~(ICANON | ECHO | ECHOE | ISIG); // Disable canonical mode, echo, etc.
+    //     ~(ICANON | ECHO | ECHOE | ISIG); // Disable canonical mode, echo,
+    //     etc.
 
     term.c_lflag &=
-        ~(ICANON | ECHO | ECHOE);            // Disable canonical mode, echo, etc.
+        ~(ICANON | ECHO | ECHOE); // Disable canonical mode, echo, etc.
     term.c_iflag &= ~(IXON | IXOFF | IXANY); // Disable flow control
     term.c_oflag &= ~OPOST;                  // Disable output processing
     term.c_cflag |= CS8;                     // 8-bit characters
-    term.c_cc[VMIN] = 1;  // Minimum number of characters to read
+    term.c_cc[VMIN]  = 1; // Minimum number of characters to read
     term.c_cc[VTIME] = 0; // No timeout for input
 
     // Apply the new terminal settings
@@ -71,8 +73,8 @@ void
 change_terminal_size(int fd, int rows, int cols)
 {
     struct winsize ws;
-    ws.ws_row = rows; // Set the number of rows (height)
-    ws.ws_col = cols; // Set the number of columns (width)
+    ws.ws_row    = rows; // Set the number of rows (height)
+    ws.ws_col    = cols; // Set the number of columns (width)
     ws.ws_xpixel = 0;
     ws.ws_ypixel = 0;
 
@@ -228,11 +230,11 @@ main(int argc, char *argv[])
     fd_set read_fds;
     int max_fd = master_fd > tty_fd ? master_fd : tty_fd;
 
-//int flags = fcntl(master_fd, F_GETFL, 0);
-// fcntl(master_fd, F_SETFL, flags | O_NONBLOCK);
+    // int flags = fcntl(master_fd, F_GETFL, 0);
+    //  fcntl(master_fd, F_SETFL, flags | O_NONBLOCK);
 
-    readq bq;
-    init_queue(&bq, master_fd);
+    struct readq bq;
+    readq_init(&bq, master_fd);
 
     // int status;
     // waitpid(pid, &status,0);
@@ -252,8 +254,8 @@ main(int argc, char *argv[])
 
         // Wait for input from either stdin or the PTY master side
         FD_ZERO(&read_fds);
-        FD_SET(tty_fd, &read_fds); // Watch for input on stdin
-        FD_SET(master_fd, &read_fds);    // Watch for output from the master side
+        FD_SET(tty_fd, &read_fds);    // Watch for input on stdin
+        FD_SET(master_fd, &read_fds); // Watch for output from the master side
 
         if (select(max_fd + 1, &read_fds, NULL, NULL, NULL) == -1) {
             if (!keepRunning)
@@ -275,7 +277,7 @@ main(int argc, char *argv[])
 
         // Handle output from the master side (output from less)
         if (FD_ISSET(master_fd, &read_fds)) {
-            if (refill_queue(&bq)) {
+            if (readq_refill(&bq)) {
                 nread = process_output(&bq);
                 if (nread > 0 && write(STDOUT_FILENO, bq.buffer, nread) == -1) {
                     perror("processing output");
@@ -300,7 +302,6 @@ end:
 void
 run_child(int fd, int argc, char *argv[])
 {
-
 #if 1
     // Create a new session to become the controlling process
     if (setsid() == -1) {
@@ -320,16 +321,16 @@ run_child(int fd, int argc, char *argv[])
         return;
     }
 
-    //if (isatty(STDIN_FILENO)) {
-    //  if (dup2(fd, STDIN_FILENO) == -1) {
-    //    perror("dup2 stdin");
-    //    return;
-    //  }
-    //}
+    // if (isatty(STDIN_FILENO)) {
+    //   if (dup2(fd, STDIN_FILENO) == -1) {
+    //     perror("dup2 stdin");
+    //     return;
+    //   }
+    // }
 
     // Add -R to the arguments passed to less
     char *less_args[argc + 2];
-    int i = 0;
+    int i          = 0;
     less_args[i++] = "less";
     less_args[i++] = "-r";
 
