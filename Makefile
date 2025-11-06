@@ -1,22 +1,72 @@
-TARGETS=	lless mess
-TESTS_SRC=	$(wildcard test-*.c)
-TESTS_BIN=	$(TESTS_SRC:.c=.bin)
+.POSIX:
 
-CFLAGS=		-I. -O0 -g -Wall -Wextra -Werror
-CFLAGS+=	-D_NETBSD_SOURCE -lutil
-#CFLAGS+=	-D_GNU_SOURCE
+VERSION=	0.1.0
+TARGETS=	mess
 
-.PHONY: default clean
-default: $(TARGETS) $(TESTS_BIN)
+TESTS_SRC=	tests/test-nav.c \
+		tests/test-parser.c \
+		tests/test-reader.c \
+		tests/integration/test-terminal.c
+
+TESTS_BIN=	tests/test-nav.bin \
+		tests/test-parser.bin \
+		tests/test-reader.bin \
+		tests/integration/test-terminal.bin
+
+CFLAGS=		-O2 -g
+CFLAGS+= 	-I. -std=c11 -Wall -Wextra -Werror
+CFLAGS+=	-DMESS_VERSION=\"$(VERSION)\"
+
+
+OS=		$(shell uname -s)
+CSOURCE=	$(shell if [ $(OS) = Linux ]; then echo _GNU_SOURCE; \
+		elif [ $(OS) = Darwin ]; then echo _DARWIN_C_SOURCE; \
+		elif [ $(OS) = NetBSD ]; then echo _NETBSD_SOURCE; \
+		else echo _POSIX_C_SOURCE=200809L; fi)
+CFLAGS+=	-D$(CSOURCE)
+
+# libutil is needed on BSD/macOS for openpty(), not on Linux.
+LDLIBS!=	if [ "$(uname -s)" != Linux ]; \
+		then echo '-lutil'; fi
+
+PREFIX=		/usr/local
+BINDIR=		$(PREFIX)/bin
+MANDIR=		$(PREFIX)/share/man
+INSTALL=	install
+
+.PHONY: all clean test install
+all: $(TARGETS) $(TESTS_BIN)
 
 clean:
-	rm -rf $(TARGETS) $(TESTS_BIN) *.dSYM
+	rm -rf $(TARGETS) $(TESTS_BIN)
+	rm -rf *.dSYM tests/*.dSYM tests/integration/*.dSYM
 
-lless: main.c nav.c readq.c
-	$(CC) $(CFLAGS) -o $@ $^
+test: $(TARGETS) $(TESTS_BIN)
+	@set -e; \
+	for t in $(TESTS_BIN); do \
+		echo "Running $$t"; \
+		if echo "$$t" | grep -q 'integration'; then \
+			$${RUN_INTEGRATION:-} ./$$t; \
+		else \
+			./$$t; \
+		fi; \
+	done
 
-mess: mess.c
-	$(CC) $(CFLAGS) -o $@ $<
+mess: mess.c pager.c nav.c readq.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-test-%.bin: test-%.c nav.c readq.c
-	$(CC) $(CFLAGS) -o $@ $^
+install: mess mess.1
+	$(INSTALL) -d "$(DESTDIR)$(BINDIR)"
+	$(INSTALL) -m 755 mess "$(DESTDIR)$(BINDIR)/mess"
+	$(INSTALL) -d "$(DESTDIR)$(MANDIR)/man1"
+	$(INSTALL) -m 644 mess.1 "$(DESTDIR)$(MANDIR)/man1/mess.1"
+
+tests/test-%.bin: tests/test-%.c nav.c readq.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/integration/test-%.bin: tests/integration/test-%.c pager.c nav.c readq.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+format:
+	@find . -name '*.h' -exec astyle --options=.astylerc {} +
+	@find . -name '*.c' -exec astyle --options=.astylerc {} +

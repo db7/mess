@@ -26,8 +26,8 @@ test_refill_preserves_unread_bytes_(void)
     assert(queue.start == 0);
     assert(queue.end == 5);
     assert(strncmp(queue.buffer, "hello", 5) == 0);
-    assert(readq_last_read_len(&queue) == 5);
-    const char *chunk = readq_last_read_ptr(&queue);
+    assert(readq_last_len(&queue) == 5);
+    const char *chunk = readq_last_ptr(&queue);
     assert(chunk != NULL && strncmp(chunk, "hello", 5) == 0);
 
     queue.start = 2; // leave "llo" unread
@@ -37,15 +37,15 @@ test_refill_preserves_unread_bytes_(void)
     assert(queue.start == 0);
     assert(queue.end == 9);
     assert(strcmp(queue.buffer, "llo world") == 0);
-    assert(readq_last_read_len(&queue) == 6);
-    chunk = readq_last_read_ptr(&queue);
+    assert(readq_last_len(&queue) == 6);
+    chunk = readq_last_ptr(&queue);
     assert(chunk != NULL && strncmp(chunk, " world", 6) == 0);
 
     close(fds[1]);
     queue.start = queue.end;
     assert(!readq_refill(&queue));
-    assert(readq_last_read_len(&queue) == 0);
-    assert(readq_last_read_ptr(&queue) == NULL);
+    assert(readq_last_len(&queue) == 0);
+    assert(readq_last_ptr(&queue) == NULL);
 
     close(fds[0]);
 }
