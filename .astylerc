@@ -1,0 +1,43 @@
+# AStyle: C, 4 spaces, Linux/K&R-ish braces
+
+mode=c
+
+# Braces: like clang BreakBeforeBraces: Linux
+style=linux
+
+# Indentation: 4 spaces, no tabs
+indent=spaces=4
+convert-tabs               # make sure we end up with spaces
+indent-switches            # indent switch body
+indent-cases               # indent case labels one level
+min-conditional-indent=0
+
+# Keep splitting one-line things (clang has AllowShort*OnASingleLine = false)
+# (Default behavior already breaks them, so we DO NOT enable keep-one-line-*)
+# keep-one-line-blocks
+# keep-one-line-statements
+
+# Column limit ~80 and breaks
+max-code-length=80
+break-after-logical        # similar spirit to clang's line breaking
+break-one-line-headers
+break-return-type
+#break-strings
+
+# Spacing: mimic your clang-format spaces
+pad-oper                   # space around =, +, -, ==, etc.
+pad-header                 # space between 'if'/'for'/'while' and '('
+unpad-paren                # no spaces just inside parentheses
+#unpad-brackets
+squeeze-lines=2
+
+# Function calls/defs: no space before '('
+# (default is already no-space, so nothing special needed)
+
+# Pointers: star binds to the name (int *p)
+align-pointer=name
+align-reference=name
+
+# Comments: keep aligned when possible
+#align-nested-parens        # helps with multi-line conditions
+

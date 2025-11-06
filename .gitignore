@@ -1,3 +1,5 @@
 compile_flags.txt
-.kakrc
-examples
+*.bin
+*.dSYM
+*.orig
+mess

@@ -25,25 +25,28 @@
 #include <string.h>
 
 
-int main(int argc, char *argv[]) {
-   if (argc != 2) {
-     fprintf(stderr, "Usage: %s <url>\n", argv[0]);
-     exit(1);
-   }
-   const char *lowdown_str= "bash -c 'clear && lowdown -tterm --term-no-links %s | lless'";
-   const char *lynx_str = "lynx %s";
-   const char *cmd_str = NULL;
+int
+main(int argc, char *argv[])
+{
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <url>\n", argv[0]);
+        exit(1);
+    }
+    const char *lowdown_str =
+        "bash -c 'clear && lowdown -tterm --term-no-links %s | lless'";
+    const char *lynx_str = "lynx %s";
+    const char *cmd_str = NULL;
 
     char cmd[1024];
     const char *link = argv[1];
     if ((strncmp(link, "file://", 7) == 0)) {
-      link = strstr(link + 7, "/");
-      cmd_str = lowdown_str;
+        link = strstr(link + 7, "/");
+        cmd_str = lowdown_str;
     } else if ((strncmp(link, "https://", 8) == 0)) {
-      cmd_str = lynx_str;
+        cmd_str = lynx_str;
     } else {
-      cmd_str = lowdown_str;
+        cmd_str = lowdown_str;
     }
-      sprintf(cmd, cmd_str, link);
-   return system(cmd);
+    sprintf(cmd, cmd_str, link);
+    return system(cmd);
 }

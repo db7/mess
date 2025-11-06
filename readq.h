@@ -8,10 +8,10 @@
 
 // Structure to manage the buffer/queue
 typedef struct {
-  char buffer[READQ_SIZE + 1]; // The buffer to hold data
-  size_t start;                   // Start index of unread data
-  size_t end;                     // End index of unread data
-  int fd;                         // File descriptor to read from
+    char buffer[READQ_SIZE + 1]; // The buffer to hold data
+    size_t start;                   // Start index of unread data
+    size_t end;                     // End index of unread data
+    int fd;                         // File descriptor to read from
 } readq;
 
 // Initialize the readq
