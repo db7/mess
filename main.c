@@ -267,7 +267,7 @@ main(int argc, char *argv[])
         // Handle input from stdin (keyboard input)
         if (FD_ISSET(tty_fd, &read_fds)) {
             nread = read(tty_fd, buffer, sizeof(buffer));
-            if (nread > 0 && process_input(buffer, nread)) {
+            if (nread > 0 && nav_process_input(buffer, &nread, READQ_SIZE)) {
                 if (write(master_fd, buffer, nread) == -1) {
                     perror("write text to master_fd");
                     goto error;
@@ -278,7 +278,7 @@ main(int argc, char *argv[])
         // Handle output from the master side (output from less)
         if (FD_ISSET(master_fd, &read_fds)) {
             if (readq_refill(&bq)) {
-                nread = process_output(&bq);
+                nread = nav_process_output(&bq);
                 if (nread > 0 && write(STDOUT_FILENO, bq.buffer, nread) == -1) {
                     perror("processing output");
                     goto error;
@@ -295,7 +295,7 @@ end:
     (void)tcsetattr(tty_fd, TCSAFLUSH, &prev_term);
     close(master_fd);
     close(tty_fd);
-    print_links();
+    nav_print_links();
     return err ? EXIT_FAILURE : 0;
 }
 
