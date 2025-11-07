@@ -1,0 +1,123 @@
+.\" Mess man page
+.TH MESS 1 "2024-10-09" "mess" "User Commands"
+.SH NAME
+mess \- wrap a pager and navigate OSC8 links
+.SH SYNOPSIS
+.B mess
+.RI [ pager-args ]
+.br
+.B mess
+.B --open
+.RI < target >
+.SH DESCRIPTION
+.B mess
+launches a pager (by default
+.BR less (1))
+inside a pseudo terminal, intercepts its output, and enables keyboard
+navigation for OSC8 hyperlinks. All command line arguments other than
+.B --open
+and
+.B --help
+are forwarded to the pager unchanged.
+.PP
+When the pager emits OSC8 hyperlinks,
+.B mess
+records them and shows the currently selected link on the last terminal
+line. Press the Tab key to cycle through the list of links, press Enter to
+open the highlighted link, or press Escape to clear the selection and resume
+normal pager input. Any other key is passed straight to the pager.
+.PP
+If the first non option argument names a Markdown file,
+.B mess
+executes
+.BR lowdown (1)
+to render the document to the terminal and pipes the generated stream into
+the pager so that hyperlinks stay active. Supplying a
+.I file://
+URL performs the same conversion once the scheme and optional fragment are
+stripped.
+.SH OPTIONS
+.TP
+.BR --open " " target
+Open
+.I target
+without launching the interactive pager. Markdown inputs are rendered through
+.BR lowdown (1),
+.I file://
+URLs are normalised and reopened in
+.BR mess ,
+and other targets are dispatched to a web browser.
+.TP
+.BR --help ", " -h
+Print a short usage summary.
+.TP
+.BR --version ", " -V
+Display the built-in version string and exit.
+.SH NAVIGATION
+When OSC8 hyperlinks are present the last terminal line shows the currently
+selected entry prefixed with
+.BR => .
+Use the following keys while the pager is running:
+.TP
+.B Tab
+Cycle through the discovered links in display order.
+.TP
+.B Enter
+Open the highlighted link using the configured launcher (see
+.B BROWSER
+under
+.BR ENVIRONMENT ).
+.TP
+.B v
+Open the current document in the editor configured via
+.B VISUAL
+or, if unset,
+.BR EDITOR .
+Once the editor exits
+.B mess
+requests a redraw from the pager to refresh the screen.
+.TP
+.B Escape
+Clear the selection and resume normal pager input.
+.PP
+Any other key is forwarded to the pager unchanged. The selection persists until
+cleared explicitly or a new buffer is viewed.
+.SH ENVIRONMENT
+.TP
+.B PAGER
+Overrides the pager command. When the first word is
+.BR less ,
+.B mess
+automatically appends
+.B -r
+unless a raw output flag is already present.
+.TP
+.B BROWSER
+Command used when opening links or non Markdown targets. The value is
+expanded using
+.BR wordexp (3).
+Fallbacks are
+.BR open (1)
+on macOS and
+.BR xdg-open (1)
+elsewhere.
+.TP
+.BR VISUAL ", " EDITOR
+Command invoked when pressing
+.B v
+during navigation. The value is expanded via
+.BR wordexp (3)
+before appending the current document path. The default fallback is the
+traditional
+.BR vi (1)
+when neither variable is set.
+.SH EXIT STATUS
+.B mess
+exits 0 when the pager and any helper processes finish successfully.
+Failures to spawn helpers, pager errors, or signal induced aborts result in a
+non zero status.
+.SH SEE ALSO
+.BR less (1),
+.BR lowdown (1),
+.BR lynx (1),
+.BR xdg-open (1)
