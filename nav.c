@@ -66,6 +66,15 @@ static status_mode_t status_mode_;
 // Reason: Remember to hide the status bar on the next keypress after it
 // appears.
 static bool status_pending_hide_;
+// Reason: Track which navigation backend should parse output/highlight links.
+static nav_mode_t nav_mode_ = NAV_MODE_OSC8;
+// Reason: Flag to force flushing of buffered bytes when the child stream ends.
+static bool force_drain_;
+// Reason: Boundaries for the man-page token parser; tokens longer than these
+// will be ignored so buffering stays simple.
+#define MAN_NAME_MAX    64
+#define MAN_SECTION_MAX 16
+#define MAN_TAIL_MAX    (MAN_NAME_MAX + MAN_SECTION_MAX + 4)
 
 // Reason: Forward declarations allow helper routines to be referenced before
 // their definitions.
@@ -86,6 +95,27 @@ static int group_end_index_(int idx);
 static int next_group_start_(int idx, int direction);
 static void show_help_overlay_(void);
 static size_t build_help_overlay_(char *dest, size_t cap, size_t width);
+static ssize_t nav_process_output_osc_(struct readq *bq, bool drain);
+static ssize_t nav_process_output_man_(struct readq *bq, bool drain);
+static size_t nav_render_highlighted_osc_(const char *input, size_t len,
+                                          char *dest, size_t dest_cap);
+static size_t nav_render_highlighted_man_(const char *input, size_t len,
+                                          char *dest, size_t dest_cap);
+static bool nav_pair_matches_selection_(const char *link, size_t link_len,
+                                        const char *text, size_t text_len);
+static void nav_store_entry_(char *link, char *text, size_t text_len);
+static bool nav_record_link_copy_(const char *link, size_t link_len,
+                                  const char *text, size_t text_len);
+static void nav_scan_man_chunk_(const char *data, size_t len);
+static size_t man_suffix_to_keep_(const char *data, size_t len, bool drain);
+static bool man_match_at_(const char *data, size_t len, size_t pos,
+                          size_t *name_len, size_t *section_offset,
+                          size_t *section_len, size_t *token_len);
+static size_t man_format_link_(char *dest, size_t cap, const char *name,
+                               size_t name_len, const char *section,
+                               size_t section_len);
+static bool man_is_name_char_(char ch);
+static bool man_is_section_char_(char ch);
 // Reason: Track the length and timeout for detecting Shift-Tab escape
 // sequences.
 #define SHIFT_TAB_SEQ_LEN         3
@@ -415,6 +445,24 @@ find_subsequence_(const char *haystack, size_t hay_len, const char *needle,
 ssize_t
 nav_process_output(struct readq *bq)
 {
+    bool drain = force_drain_;
+    force_drain_ = false;
+    if (!bq)
+        return 0;
+    // Reason: Route to the active backend so OSC8 parsing and man scanning can
+    // coexist while sharing the rest of the navigation infrastructure.
+    switch (nav_mode_) {
+    case NAV_MODE_MAN:
+        return nav_process_output_man_(bq, drain);
+    case NAV_MODE_OSC8:
+    default:
+        return nav_process_output_osc_(bq, drain);
+    }
+}
+
+static ssize_t
+nav_process_output_osc_(struct readq *bq, bool drain)
+{
     // Reason: Define the OSC 8 sequences we need to detect link start and end
     // boundaries.
     const char *osc8_start = "\e]8";
@@ -468,38 +516,13 @@ nav_process_output(struct readq *bq)
         // Reason: Only cache entries that contain both the URL and its display
         // text.
         if (pair.link && pair.text) {
-            int slot;
-            if (url_count_ < MAX_URLS) {
-                // Reason: Append when space remains in the ring buffer.
-                slot = (url_head_ + url_count_) % MAX_URLS;
-                url_count_++;
-            } else {
-                // Reason: Evict the oldest link when at capacity to keep the
-                // freshest entries.
-                slot      = url_head_;
-                url_head_ = (url_head_ + 1) % MAX_URLS;
-            }
-            // Reason: Clear prior contents in the slot before storing the new
-            // link entry.
-            free_pair_(&urls_[slot]);
-            urls_[slot].link = pair.link;
-            urls_[slot].text = pair.text;
-            urls_[slot].row  = -1;
-            urls_[slot].col  = -1;
-            urls_[slot].len  = pair.len;
-            // Reason: Null out the original pointers since the ring buffer now
-            // owns the storage.
+            nav_store_entry_(pair.link, pair.text, pair.len);
             pair.link = NULL;
             pair.text = NULL;
-            if (current_launcher_ == NULL)
-                // Reason: Ensure a default launcher exists once links are
-                // available.
-                current_launcher_ = launch_with_mess_;
-        } else {
-            // Reason: Discard incomplete entries so later code never reads
-            // dangling pointers.
-            free_pair_(&pair);
         }
+        // Reason: Discard ownership if storage moved elsewhere or parsing
+        // failed.
+        free_pair_(&pair);
 
         // Reason: Advance beyond the processed OSC 8 block so the loop
         // continues with fresh data.
@@ -508,12 +531,54 @@ nav_process_output(struct readq *bq)
     // Reason: Sanity-check that the queue indices never invert.
     assert(bq->start <= bq->end);
     // Reason: Let the caller know how far into the buffer the parser advanced.
+    if (drain)
+        bq->start = bq->end;
     return bq->start;
+}
+
+static ssize_t
+nav_process_output_man_(struct readq *bq, bool drain)
+{
+    if (!bq)
+        return 0;
+
+    size_t total = bq->end - bq->start;
+    if (total == 0)
+        return 0;
+
+    const char *data = bq->buffer + bq->start;
+    size_t tail_keep = man_suffix_to_keep_(data, total, drain);
+    if (tail_keep > total)
+        tail_keep = total;
+    size_t usable = total - tail_keep;
+
+    if (usable > 0)
+        // Reason: Only scan the portion guaranteed to contain whole tokens so
+        // partial matches at the boundary are preserved for the next refill.
+        nav_scan_man_chunk_(data, usable);
+
+    bq->start += usable;
+    if (drain)
+        bq->start = bq->end;
+    return (ssize_t)usable;
 }
 
 size_t
 nav_render_highlighted(const char *input, size_t len, char *dest,
                        size_t dest_cap)
+{
+    switch (nav_mode_) {
+    case NAV_MODE_MAN:
+        return nav_render_highlighted_man_(input, len, dest, dest_cap);
+    case NAV_MODE_OSC8:
+    default:
+        return nav_render_highlighted_osc_(input, len, dest, dest_cap);
+    }
+}
+
+static size_t
+nav_render_highlighted_osc_(const char *input, size_t len, char *dest,
+                            size_t dest_cap)
 {
     // Reason: Short helpers for delimiting OSC 8 links and their closing
     // sequences.
@@ -526,31 +591,6 @@ nav_render_highlighted(const char *input, size_t len, char *dest,
     const size_t highlight_on_len  = strlen(HIGHLIGHT_ON);
     const size_t highlight_off_len = strlen(HIGHLIGHT_OFF);
 
-    // Reason: Track the contiguous group associated with the current selection.
-    const char *group_links[MAX_URLS];
-    const char *group_texts[MAX_URLS];
-    size_t group_link_lens[MAX_URLS];
-    size_t group_text_lens[MAX_URLS];
-    int group_count = 0;
-    if (selected_idx_ >= 0 && url_count_ > 0) {
-        int group_start = group_start_index_(selected_idx_);
-        int group_end   = group_end_index_(selected_idx_);
-        for (int i = group_start; i <= group_end; ++i) {
-            int physical = logical_to_physical_(i);
-            if (physical < 0)
-                continue;
-            const char *link = urls_[physical].link;
-            const char *text = urls_[physical].text;
-            if (!link || !text)
-                continue;
-            group_links[group_count]     = link;
-            group_texts[group_count]     = text;
-            group_link_lens[group_count] = strlen(link);
-            group_text_lens[group_count] = strlen(text);
-            group_count++;
-        }
-    }
-
     // Reason: Maintain independent cursors for input scanning and destination
     // writes.
     size_t pos = 0;
@@ -560,12 +600,8 @@ nav_render_highlighted(const char *input, size_t len, char *dest,
     while (pos < len) {
         const char *esc = memchr(input + pos, '\x1b', len - pos);
         if (!esc) {
-            // Reason: Copy literal tail data directly when no further escapes
-            // are present.
             size_t chunk = len - pos;
             if (out + chunk > dest_cap)
-                // Reason: Fail fast if the destination buffer cannot hold the
-                // remaining literal bytes.
                 return 0;
             memcpy(dest + out, input + pos, chunk);
             out += chunk;
@@ -575,67 +611,46 @@ nav_render_highlighted(const char *input, size_t len, char *dest,
         size_t literal_len = (size_t)(esc - (input + pos));
         if (literal_len > 0) {
             if (out + literal_len > dest_cap)
-                // Reason: Ensure there is room for literal characters before
-                // copying them.
                 return 0;
-            // Reason: Preserve plain text segments before the next escape
-            // sequence.
             memcpy(dest + out, input + pos, literal_len);
             out += literal_len;
             pos += literal_len;
         }
 
         if (pos >= len)
-            // Reason: Stop scanning once we reach the end of the input buffer.
             break;
 
         size_t remaining = len - pos;
-        // Reason: Only OSC 8 sequences begin with ESC ], so anything else is
-        // copied verbatim.
         if (remaining < 3 || input[pos + 1] != ']' || input[pos + 2] != '8') {
             if (out + 1 > dest_cap)
-                // Reason: Do not write partial escape bytes if the output
-                // buffer is full.
                 return 0;
-            // Reason: Forward non-OSC escapes untouched to avoid corrupting
-            // other control codes.
             dest[out++] = input[pos++];
             continue;
         }
 
-        // Reason: Remember where this OSC 8 block begins so we can copy leading
-        // bytes as-is.
         const char *block_start = input + pos;
-        // Reason: Skip over OSC 8 parameters before reaching the URL delimiter.
         const char *first_semicolon =
             memchr(block_start + 3, ';', (input + len) - (block_start + 3));
         if (!first_semicolon) {
             size_t chunk = len - pos;
             if (out + chunk > dest_cap)
-                // Reason: Avoid overrunning the destination when copying
-                // incomplete sequences.
                 return 0;
             memcpy(dest + out, block_start, chunk);
             out += chunk;
             break;
         }
 
-        // Reason: The second semicolon marks the start of the actual link
-        // payload.
         const char *second_semicolon = memchr(
                                            first_semicolon + 1, ';', (input + len) - (first_semicolon + 1));
         if (!second_semicolon) {
             size_t chunk = len - pos;
             if (out + chunk > dest_cap)
-                // Reason: Delay processing until sufficient data arrives to
-                // avoid truncation.
                 return 0;
             memcpy(dest + out, block_start, chunk);
             out += chunk;
             break;
         }
 
-        // Reason: The actual URL starts after the OSC parameter delimiters.
         const char *link_start = second_semicolon + 1;
         const char *link_end =
             find_subsequence_(link_start, (input + len) - link_start,
@@ -643,66 +658,39 @@ nav_render_highlighted(const char *input, size_t len, char *dest,
         if (!link_end) {
             size_t chunk = len - pos;
             if (out + chunk > dest_cap)
-                // Reason: Guard against buffer overflow when copying partial
-                // link payloads.
                 return 0;
-            // Reason: Defer incomplete link payloads until more bytes arrive.
             memcpy(dest + out, block_start, chunk);
             out += chunk;
             break;
         }
 
         const char *text_start = link_end + link_term_len;
-        // Reason: Use the helper search to safely locate the OSC 8 closing
-        // sequence inside the buffer.
         const char *text_end = find_subsequence_(
                                    text_start, (input + len) - text_start, osc8_close, closing_len);
         if (!text_end) {
             size_t chunk = len - pos;
             if (out + chunk > dest_cap)
-                // Reason: Maintain safety when buffering incomplete OSC close
-                // sequences.
                 return 0;
-            // Reason: Avoid cutting off the OSC 8 close sequence if it spans
-            // buffers.
             memcpy(dest + out, block_start, chunk);
             out += chunk;
             break;
         }
 
-        // Reason: Copy the OSC header portion unchanged before manipulating the
-        // text body.
         size_t prefix_len = (size_t)(text_start - block_start);
         if (out + prefix_len > dest_cap)
-            // Reason: Prevent buffer overflows by signaling failure when
-            // capacity is insufficient.
             return 0;
         memcpy(dest + out, block_start, prefix_len);
         out += prefix_len;
 
         size_t link_len = (size_t)(link_end - link_start);
         size_t text_len = (size_t)(text_end - text_start);
-        bool highlight  = false;
-        if (group_count > 0) {
-            for (int g = 0; g < group_count; ++g) {
-                if (group_link_lens[g] == link_len &&
-                    group_text_lens[g] == text_len &&
-                    strncmp(group_links[g], link_start, link_len) == 0 &&
-                    strncmp(group_texts[g], text_start, text_len) == 0) {
-                    highlight = true;
-                    break;
-                }
-            }
-        }
+        bool highlight  =
+            nav_pair_matches_selection_(link_start, link_len, text_start, text_len);
 
         if (highlight) {
             if (out + highlight_on_len + text_len + highlight_off_len >
                 dest_cap)
-                // Reason: Ensure the highlight wrappers and text can be emitted
-                // without overflow.
                 return 0;
-            // Reason: Surround the selected link text with inverse-video
-            // sequences for visibility.
             memcpy(dest + out, HIGHLIGHT_ON, highlight_on_len);
             out += highlight_on_len;
             memcpy(dest + out, text_start, text_len);
@@ -717,21 +705,196 @@ nav_render_highlighted(const char *input, size_t len, char *dest,
         }
 
         if (out + closing_len > dest_cap)
-            // Reason: Verify space exists for the OSC close trailer before
-            // writing it.
             return 0;
-        // Reason: Preserve the OSC 8 closing trailer so downstream consumers
-        // still see link metadata.
         memcpy(dest + out, text_end, closing_len);
         out += closing_len;
 
-        // Reason: Advance scanning past the terminal sequence we just emitted.
         pos = (size_t)(text_end - input) + closing_len;
     }
 
-    // Reason: Inform the caller how many bytes were written into the
-    // destination buffer.
     return out;
+}
+
+static size_t
+nav_render_highlighted_man_(const char *input, size_t len, char *dest,
+                            size_t dest_cap)
+{
+    const size_t highlight_on_len  = strlen(HIGHLIGHT_ON);
+    const size_t highlight_off_len = strlen(HIGHLIGHT_OFF);
+    size_t pos                     = 0;
+    size_t out                     = 0;
+
+    // Reason: Scan plain text for `name(section)` tokens and wrap the selected
+    // one in inverse-video sequences much like the OSC8 path does.
+    while (pos < len) {
+        size_t name_len = 0;
+        size_t section_offset;
+        size_t section_len = 0;
+        size_t token_len   = 0;
+        if (!man_match_at_(
+                input, len, pos, &name_len, &section_offset, &section_len,
+                &token_len)) {
+            if (out + 1 > dest_cap)
+                return 0;
+            dest[out++] = input[pos++];
+            continue;
+        }
+
+        const char *name    = input + pos;
+        const char *section = name + section_offset;
+        char link_buf[MAN_NAME_MAX + MAN_SECTION_MAX + 16];
+        size_t link_len =
+            man_format_link_(link_buf, sizeof(link_buf), name, name_len,
+                             section, section_len);
+        bool highlight = link_len > 0 &&
+                         nav_pair_matches_selection_(link_buf, link_len, name,
+                                                     token_len);
+
+        size_t needed = token_len + (highlight
+                                         ? (highlight_on_len + highlight_off_len)
+                                         : 0);
+        if (out + needed > dest_cap)
+            return 0;
+
+        if (highlight) {
+            memcpy(dest + out, HIGHLIGHT_ON, highlight_on_len);
+            out += highlight_on_len;
+        }
+        memcpy(dest + out, name, token_len);
+        out += token_len;
+        if (highlight) {
+            memcpy(dest + out, HIGHLIGHT_OFF, highlight_off_len);
+            out += highlight_off_len;
+        }
+
+        pos += token_len;
+    }
+
+    return out;
+}
+
+static bool
+man_is_name_char_(char ch)
+{
+    // Reason: Historical manpage references allow alnum as well as '_'/'-' for
+    // section names like `pthread_mutex_init`.
+    return isalnum((unsigned char)ch) || ch == '_' || ch == '-';
+}
+
+static bool
+man_is_section_char_(char ch)
+{
+    // Reason: Sections commonly include dots/subsections, so permit a slightly
+    // wider range while still rejecting whitespace.
+    return isalnum((unsigned char)ch) || ch == '.' || ch == '_';
+}
+
+static bool
+man_match_at_(const char *data, size_t len, size_t pos, size_t *name_len,
+              size_t *section_offset, size_t *section_len, size_t *token_len)
+{
+    if (!data || pos >= len)
+        return false;
+    // Reason: Require anchors like foo(3) so we know how to build a man://
+    // target; partial tokens are ignored to avoid false positives.
+
+    size_t i = pos;
+    if (!man_is_name_char_(data[i]))
+        return false;
+
+    while (i < len && man_is_name_char_(data[i])) {
+        if (i - pos >= MAN_NAME_MAX)
+            return false;
+        i++;
+    }
+    if (i >= len || data[i] != '(' || i == pos)
+        return false;
+
+    size_t section_start = i + 1;
+    size_t j             = section_start;
+    bool has_section     = false;
+    while (j < len && man_is_section_char_(data[j])) {
+        if (j - section_start >= MAN_SECTION_MAX)
+            return false;
+        has_section = true;
+        j++;
+    }
+    if (!has_section || j >= len || data[j] != ')')
+        return false;
+
+    if (name_len)
+        *name_len = i - pos;
+    if (section_offset)
+        *section_offset = section_start - pos;
+    if (section_len)
+        *section_len = j - section_start;
+    if (token_len)
+        *token_len = (j - pos) + 1;
+    return true;
+}
+
+static size_t
+man_format_link_(char *dest, size_t cap, const char *name, size_t name_len,
+                 const char *section, size_t section_len)
+{
+    if (!dest || cap == 0)
+        return 0;
+    // Reason: Emit the canonical scheme `man://name.section` so downstream
+    // launchers can reuse the dispatcher path.
+    int written = snprintf(dest, cap, "man://%.*s.%.*s", (int)name_len, name,
+                           (int)section_len, section);
+    if (written <= 0)
+        return 0;
+    if ((size_t)written >= cap)
+        return 0;
+    return (size_t)written;
+}
+
+static void
+nav_scan_man_chunk_(const char *data, size_t len)
+{
+    size_t pos = 0;
+    while (pos < len) {
+        size_t name_len = 0;
+        size_t section_offset;
+        size_t section_len = 0;
+        size_t token_len   = 0;
+        if (!man_match_at_(data, len, pos, &name_len, &section_offset,
+                           &section_len, &token_len)) {
+            pos++;
+            continue;
+        }
+
+        const char *name    = data + pos;
+        const char *section = name + section_offset;
+        char link_buf[MAN_NAME_MAX + MAN_SECTION_MAX + 16];
+        size_t link_len =
+            man_format_link_(link_buf, sizeof(link_buf), name, name_len,
+                             section, section_len);
+        if (link_len > 0)
+            // Reason: Copy the discovered token into navigation storage so it
+            // behaves like a standard OSC link entry.
+            nav_record_link_copy_(link_buf, link_len, name, token_len);
+        pos += token_len;
+    }
+}
+
+static size_t
+man_suffix_to_keep_(const char *data, size_t len, bool drain)
+{
+    if (drain || len == 0)
+        return 0;
+    // Reason: Keep a short tail so tokens split across reads can be reassembled
+    // without rescanning the entire buffer.
+    size_t limit = len < MAN_TAIL_MAX ? len : MAN_TAIL_MAX;
+    size_t keep  = 0;
+    while (keep < limit) {
+        char ch = data[len - keep - 1];
+        if (ch == '\n' || ch == '\r' || ch == '\t' || ch == ' ')
+            break;
+        keep++;
+    }
+    return keep;
 }
 
 // Decode an OSC 8 sequence into a link/text pair.
@@ -843,6 +1006,98 @@ nav_reset(void)
     status_mode_         = STATUS_NONE;
     status_pending_hide_ = false;
     input_fd_            = -1;
+    force_drain_         = false;
+}
+
+void
+nav_set_mode(nav_mode_t mode)
+{
+    // Reason: Allow callers to flip parsers per-invocation without reinitializing
+    // the rest of the navigation subsystem.
+    nav_mode_ = mode;
+}
+
+nav_mode_t
+nav_current_mode(void)
+{
+    return nav_mode_;
+}
+
+void
+nav_request_drain(void)
+{
+    // Reason: Signal the parser to treat the next chunk as end-of-stream so it
+    // flushes any partial tokens instead of leaving them buffered indefinitely.
+    force_drain_ = true;
+}
+
+static void
+nav_store_entry_(char *link, char *text, size_t text_len)
+{
+    if (!link || !text)
+        return;
+
+    int slot;
+    if (url_count_ < MAX_URLS) {
+        slot = (url_head_ + url_count_) % MAX_URLS;
+        url_count_++;
+    } else {
+        slot      = url_head_;
+        url_head_ = (url_head_ + 1) % MAX_URLS;
+    }
+
+    free_pair_(&urls_[slot]);
+    urls_[slot].link = link;
+    urls_[slot].text = text;
+    urls_[slot].row  = -1;
+    urls_[slot].col  = -1;
+    urls_[slot].len  = text_len;
+    if (current_launcher_ == NULL)
+        current_launcher_ = launch_with_mess_;
+}
+
+static bool
+nav_record_link_copy_(const char *link, size_t link_len, const char *text,
+                      size_t text_len)
+{
+    if (!link || !text || link_len == 0 || text_len == 0)
+        return false;
+    char *link_copy = strndup(link, link_len);
+    char *text_copy = strndup(text, text_len);
+    if (!link_copy || !text_copy) {
+        free(link_copy);
+        free(text_copy);
+        return false;
+    }
+    nav_store_entry_(link_copy, text_copy, text_len);
+    return true;
+}
+
+static bool
+nav_pair_matches_selection_(const char *link, size_t link_len,
+                            const char *text, size_t text_len)
+{
+    if (selected_idx_ < 0 || url_count_ <= 0 || !link || !text)
+        return false;
+
+    int group_start = group_start_index_(selected_idx_);
+    int group_end   = group_end_index_(selected_idx_);
+    for (int i = group_start; i <= group_end; ++i) {
+        int physical = logical_to_physical_(i);
+        if (physical < 0)
+            continue;
+        const char *group_link = urls_[physical].link;
+        const char *group_text = urls_[physical].text;
+        if (!group_link || !group_text)
+            continue;
+        size_t group_link_len = strlen(group_link);
+        size_t group_text_len = strlen(group_text);
+        if (group_link_len == link_len && group_text_len == text_len &&
+            strncmp(group_link, link, link_len) == 0 &&
+            strncmp(group_text, text, text_len) == 0)
+            return true;
+    }
+    return false;
 }
 
 void

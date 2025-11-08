@@ -1,5 +1,6 @@
-#include "pager.h"
 #include "nav.h"
+#include "pager.h"
+#include "man.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -36,6 +37,11 @@ static char *strip_fragment_(const char *link);
 static int run_simple_command_(char *const argv[]);
 static int pager_invoke_(char *target, char **pager_flags,
                          int pager_flag_count);
+static int pager_invoke_mode_(nav_mode_t mode, char *target,
+                              char **pager_flags, int pager_flag_count);
+
+static bool cli_mode_forced_;
+static nav_mode_t cli_forced_mode_;
 
 #ifndef MESS_VERSION
 #define MESS_VERSION "dev"
@@ -60,6 +66,13 @@ main(int argc, char *argv[])
             usage_(argv[0]);
             return 0;
         }
+        if (strcmp(argv[1], "--man") == 0 || strcmp(argv[1], "-m") == 0) {
+            cli_mode_forced_ = true;
+            cli_forced_mode_ = NAV_MODE_MAN;
+            // Shift argv so dispatcher sees the remaining args unchanged.
+            argc--;
+            argv++;
+        }
     }
 
     return dispatcher_handle_arguments(argc, argv);
@@ -71,7 +84,7 @@ usage_(const char *prog)
 {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [pager-args]\n"
+            "  %s [-m] [pager-args]\n"
             "  %s --open <url>\n"
             "  %s --version\n",
             prog, prog, prog);
@@ -102,6 +115,11 @@ dispatcher_handle_arguments(int argc, char *argv[])
 
     for (int i = 1; i < search_end; ++i) {
         const char *arg = argv[i];
+        if (strcmp(arg, "-m") == 0 || strcmp(arg, "--man") == 0) {
+            cli_mode_forced_ = true;
+            cli_forced_mode_ = NAV_MODE_MAN;
+            continue;
+        }
         if (arg[0] == '-' && arg[1] != '\0') {
             if (target_index != -1) {
                 fprintf(stderr,
@@ -398,7 +416,8 @@ run_markdown_stream_(const char *path, char **pager_flags, int pager_flag_count)
     }
     close(pipefd[0]);
 
-    int rc = pager_invoke_(NULL, pager_flags, pager_flag_count);
+    int rc = pager_invoke_mode_(NAV_MODE_MAN, NULL, pager_flags,
+                                pager_flag_count);
 
     if (dup2(saved_stdin, STDIN_FILENO) == -1) {
         perror("restore stdin");
@@ -466,7 +485,8 @@ run_man_stream_(const char *path, char **pager_flags, int pager_flag_count)
     }
     close(pipefd[0]);
 
-    int rc = pager_invoke_(NULL, pager_flags, pager_flag_count);
+    int rc = pager_invoke_mode_(NAV_MODE_MAN, NULL, pager_flags,
+                                pager_flag_count);
 
     if (dup2(saved_stdin, STDIN_FILENO) == -1)
         perror("restore stdin");
@@ -653,6 +673,15 @@ run_simple_command_(char *const argv[])
 static int
 pager_invoke_(char *target, char **pager_flags, int pager_flag_count)
 {
+    nav_mode_t mode =
+        cli_mode_forced_ ? cli_forced_mode_ : NAV_MODE_OSC8;
+    return pager_invoke_mode_(mode, target, pager_flags, pager_flag_count);
+}
+
+static int
+pager_invoke_mode_(nav_mode_t mode, char *target, char **pager_flags,
+                   int pager_flag_count)
+{
     int total   = 1 + pager_flag_count + (target ? 1 : 0);
     char **argv = calloc((size_t)total + 1, sizeof(char *));
     if (!argv) {
@@ -667,7 +696,9 @@ pager_invoke_(char *target, char **pager_flags, int pager_flag_count)
         argv[1 + pager_flag_count] = target;
     argv[total] = NULL;
 
-    int rc = pager_run(total, argv);
+    // Reason: Reuse the pager harness for both OSC8 and man highlight modes.
+    int rc =
+        (mode == NAV_MODE_MAN) ? man_run(total, argv) : pager_run(total, argv);
     free(argv);
     return rc;
 }

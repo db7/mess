@@ -52,7 +52,7 @@ test: $(TARGETS) $(TESTS_BIN)
 		fi; \
 	done
 
-mess: mess.c pager.c nav.c readq.c
+mess: mess.c pager.c man.c wrapper.c nav.c readq.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 install: mess mess.1
@@ -64,7 +64,7 @@ install: mess mess.1
 tests/test-%.bin: tests/test-%.c nav.c readq.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-tests/integration/test-%.bin: tests/integration/test-%.c pager.c nav.c readq.c
+tests/integration/test-%.bin: tests/integration/test-%.c pager.c wrapper.c nav.c readq.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 format:

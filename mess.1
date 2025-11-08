@@ -7,6 +7,10 @@ mess \- wrap a pager and navigate OSC8 links
 .RI [ pager-args ]
 .br
 .B mess
+.B -m
+.RI [ pager-args ]
+.br
+.B mess
 .B --open
 .RI < target >
 .SH DESCRIPTION
@@ -36,6 +40,17 @@ the pager so that hyperlinks stay active. Supplying a
 .I file://
 URL performs the same conversion once the scheme and optional fragment are
 stripped.
+.PP
+When the input stream is a manual page,
+.B mess
+looks for tokens such as
+.I printf(3)
+or
+.I socket(2)
+and exposes them as navigation targets. Cycling through links now highlights
+those references directly in the pager, and activating them opens the matching
+.I man://
+URI.
 .SH OPTIONS
 .TP
 .BR --open " " target
@@ -55,6 +70,12 @@ so
 looks up
 .BR mess (1),
 and other targets are dispatched to a web browser.
+.TP
+.BR --man ", " -m
+Force the navigation layer to treat piped input as a manual page even when no
+file extension or `man://` scheme is available. Useful when wiring `mess` into
+.B MANPAGER
+so `man` output keeps the richer link navigation.
 .TP
 .BR --help ", " -h
 Print a short usage summary.

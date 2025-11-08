@@ -15,6 +15,13 @@
 typedef int (*nav_launcher_fn)(const char *link, const char *text);
 typedef int (*nav_editor_fn)(const char *path);
 
+// Reason: Distinguish between the OSC8 hyperlink parser (default) and the
+// manual-page token parser so callers can switch behaviours per document.
+typedef enum {
+    NAV_MODE_OSC8 = 0,
+    NAV_MODE_MAN  = 1,
+} nav_mode_t;
+
 // Extract USC8 links from pager output, keeping URLs stored in internal state.
 ssize_t nav_process_output(struct readq *bq);
 
@@ -62,6 +69,14 @@ void nav_request_refresh(void);
 
 // Re-render the status line for the current selection (or clear it).
 void nav_render_status(void);
+
+// Toggle between supported navigation parsers.
+void nav_set_mode(nav_mode_t mode);
+nav_mode_t nav_current_mode(void);
+
+// Request flushing of any buffered output when the producer closes the stream
+// so partial tokens are not left in limbo.
+void nav_request_drain(void);
 
 // Helpers for inspecting navigation state (primarily for tests)
 

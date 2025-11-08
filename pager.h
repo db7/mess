@@ -1,9 +1,7 @@
 #ifndef PAGER_H
 #define PAGER_H
 
-#include <termios.h>
-
-typedef void (*pager_termios_hook_fn)(const struct termios *term, char stage);
+#include "wrapper.h"
 
 // Run the pager executable with the provided arguments.
 int pager_run(int argc, char *argv[]);
