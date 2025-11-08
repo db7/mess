@@ -29,6 +29,7 @@
 static bool set_raw_mode_(int fd, struct termios *out_prev);
 static void change_terminal_size_(int fd, int rows, int cols);
 static void get_terminal_size_(int fd, int *rows, int *cols);
+static bool fetch_terminal_size_(struct winsize *ws);
 static void run_child_(int fd, int argc, char *argv[]);
 static int run_parent_(int child_fd, pid_t pid);
 static void restore_terminal_fd_(int fd);
@@ -50,6 +51,8 @@ static int restore_fd_at_exit_             = -1;
 static volatile int keepRunning_           = 1;
 static volatile sig_atomic_t sigint_count_ = 0;
 static int debug_output_fd_                = -2;
+static int last_known_rows_                = 24;
+static int last_known_cols_                = 80;
 
 void
 wrapper_set_termios_hook(pager_termios_hook_fn hook)
@@ -126,15 +129,46 @@ change_terminal_size_(int fd, int rows, int cols)
 }
 
 // Query the current window size for a PTY file descriptor.
+static bool
+fetch_terminal_size_(struct winsize *ws)
+{
+    if (!ws)
+        return false;
+    const int cand[] = {STDOUT_FILENO, STDIN_FILENO, STDERR_FILENO};
+    for (size_t i = 0; i < sizeof(cand) / sizeof(cand[0]); ++i) {
+        if (ioctl(cand[i], TIOCGWINSZ, ws) == 0 && ws->ws_row > 0 &&
+            ws->ws_col > 0) {
+            last_known_rows_ = ws->ws_row;
+            last_known_cols_ = ws->ws_col;
+            return true;
+        }
+    }
+    int tty = open("/dev/tty", O_RDONLY);
+    if (tty >= 0) {
+        bool ok = (ioctl(tty, TIOCGWINSZ, ws) == 0 && ws->ws_row > 0 &&
+                   ws->ws_col > 0);
+        close(tty);
+        if (ok) {
+            last_known_rows_ = ws->ws_row;
+            last_known_cols_ = ws->ws_col;
+            return true;
+        }
+    }
+    return false;
+}
+
 static void
 get_terminal_size_(int fd, int *rows, int *cols)
 {
     struct winsize ws;
     if (ioctl(fd, TIOCGWINSZ, &ws) == -1) {
-        perror("ioctl TIOCGWINSZ");
-        // Treat inability to read the terminal geometry as fatal; downstream
-        // callers rely on accurate dimensions to size the PTY correctly.
-        exit(EXIT_FAILURE);
+        if (!fetch_terminal_size_(&ws)) {
+            ws.ws_row = last_known_rows_;
+            ws.ws_col = last_known_cols_;
+        }
+    } else if (ws.ws_row > 0 && ws.ws_col > 0) {
+        last_known_rows_ = ws.ws_row;
+        last_known_cols_ = ws.ws_col;
     }
     *rows = ws.ws_row;
     *cols = ws.ws_col;
@@ -188,11 +222,11 @@ wrapper_run(const struct wrapper_config *config)
     }
 #else
     struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1) {
-        perror("ioctl TIOCGWINSZ");
-        // The pager requires a usable controlling terminal; bail out if we
-        // cannot read its size before spawning the child.
-        exit(EXIT_FAILURE);
+    if (!fetch_terminal_size_(&ws)) {
+        ws.ws_row    = last_known_rows_;
+        ws.ws_col    = last_known_cols_;
+        ws.ws_xpixel = 0;
+        ws.ws_ypixel = 0;
     }
     if (openpty(&master_fd, &slave_fd, NULL, NULL, &ws) == -1) {
         perror("openpty");

@@ -98,9 +98,9 @@ static size_t build_help_overlay_(char *dest, size_t cap, size_t width);
 static ssize_t nav_process_output_osc_(struct readq *bq, bool drain);
 static ssize_t nav_process_output_man_(struct readq *bq, bool drain);
 static size_t nav_render_highlighted_osc_(const char *input, size_t len,
-                                          char *dest, size_t dest_cap);
+        char *dest, size_t dest_cap);
 static size_t nav_render_highlighted_man_(const char *input, size_t len,
-                                          char *dest, size_t dest_cap);
+        char *dest, size_t dest_cap);
 static bool nav_pair_matches_selection_(const char *link, size_t link_len,
                                         const char *text, size_t text_len);
 static void nav_store_entry_(char *link, char *text, size_t text_len);
@@ -452,11 +452,11 @@ nav_process_output(struct readq *bq)
     // Reason: Route to the active backend so OSC8 parsing and man scanning can
     // coexist while sharing the rest of the navigation infrastructure.
     switch (nav_mode_) {
-    case NAV_MODE_MAN:
-        return nav_process_output_man_(bq, drain);
-    case NAV_MODE_OSC8:
-    default:
-        return nav_process_output_osc_(bq, drain);
+        case NAV_MODE_MAN:
+            return nav_process_output_man_(bq, drain);
+        case NAV_MODE_OSC8:
+        default:
+            return nav_process_output_osc_(bq, drain);
     }
 }
 
@@ -568,11 +568,11 @@ nav_render_highlighted(const char *input, size_t len, char *dest,
                        size_t dest_cap)
 {
     switch (nav_mode_) {
-    case NAV_MODE_MAN:
-        return nav_render_highlighted_man_(input, len, dest, dest_cap);
-    case NAV_MODE_OSC8:
-    default:
-        return nav_render_highlighted_osc_(input, len, dest, dest_cap);
+        case NAV_MODE_MAN:
+            return nav_render_highlighted_man_(input, len, dest, dest_cap);
+        case NAV_MODE_OSC8:
+        default:
+            return nav_render_highlighted_osc_(input, len, dest, dest_cap);
     }
 }
 
@@ -748,11 +748,11 @@ nav_render_highlighted_man_(const char *input, size_t len, char *dest,
                              section, section_len);
         bool highlight = link_len > 0 &&
                          nav_pair_matches_selection_(link_buf, link_len, name,
-                                                     token_len);
+                             token_len);
 
         size_t needed = token_len + (highlight
-                                         ? (highlight_on_len + highlight_off_len)
-                                         : 0);
+                                     ? (highlight_on_len + highlight_off_len)
+                                     : 0);
         if (out + needed > dest_cap)
             return 0;
 

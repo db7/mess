@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
+#include <getopt.h>
 #include <fcntl.h>
 #include <regex.h>
 #include <stdbool.h>
@@ -25,7 +26,8 @@ static int dispatcher_open_link(const char *link, char **pager_flags,
 static bool is_markdown_path_(const char *path);
 static bool is_manpage_path_(const char *path);
 static bool is_url_(const char *target);
-static bool parse_man_uri_(const char *uri, char **name_out, char **section_out);
+static bool parse_man_uri_(const char *uri, char **name_out,
+                           char **section_out);
 static int run_markdown_stream_(const char *path, char **pager_flags,
                                 int pager_flag_count);
 static int run_man_stream_(const char *path, char **pager_flags,
@@ -50,32 +52,50 @@ static nav_mode_t cli_forced_mode_;
 int
 main(int argc, char *argv[])
 {
-    if (argc > 1) {
-        if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0) {
-            print_version_();
-            return 0;
-        }
-        if (strcmp(argv[1], "--open") == 0) {
-            if (argc < 3) {
-                usage_(argv[0]);
+    cli_mode_forced_ = false;
+    cli_forced_mode_ = NAV_MODE_OSC8;
+
+    const char *prog = argv[0];
+    char *open_arg   = NULL;
+    int opt;
+    static const struct option long_opts[] = {
+        {"help", no_argument, NULL, 'h'},
+        {"version", no_argument, NULL, 'V'},
+        {"open", required_argument, NULL, 'o'},
+        {"man", no_argument, NULL, 'm'},
+        {NULL, 0, NULL, 0}
+    };
+
+    opterr = 0;
+    while ((opt = getopt_long(argc, argv, "hVmo:", long_opts, NULL)) != -1) {
+        switch (opt) {
+            case 'h':
+                usage_(prog);
+                return 0;
+            case 'V':
+                print_version_();
+                return 0;
+            case 'm':
+                cli_mode_forced_ = true;
+                cli_forced_mode_ = NAV_MODE_MAN;
+                break;
+            case 'o':
+                open_arg = optarg;
+                break;
+            default:
+                usage_(prog);
                 return EXIT_FAILURE;
-            }
-            return dispatcher_open_link(argv[2], NULL, 0);
-        }
-        if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-            usage_(argv[0]);
-            return 0;
-        }
-        if (strcmp(argv[1], "--man") == 0 || strcmp(argv[1], "-m") == 0) {
-            cli_mode_forced_ = true;
-            cli_forced_mode_ = NAV_MODE_MAN;
-            // Shift argv so dispatcher sees the remaining args unchanged.
-            argc--;
-            argv++;
         }
     }
 
-    return dispatcher_handle_arguments(argc, argv);
+    if (open_arg)
+        return dispatcher_open_link(open_arg, NULL, 0);
+
+    if (optind > 1)
+        argv[optind - 1] = argv[0];
+    int tail_argc    = argc - optind + 1;
+    char **tail_argv = argv + optind - 1;
+    return dispatcher_handle_arguments(tail_argc, tail_argv);
 }
 
 // Print the command-line usage banner.
@@ -115,11 +135,6 @@ dispatcher_handle_arguments(int argc, char *argv[])
 
     for (int i = 1; i < search_end; ++i) {
         const char *arg = argv[i];
-        if (strcmp(arg, "-m") == 0 || strcmp(arg, "--man") == 0) {
-            cli_mode_forced_ = true;
-            cli_forced_mode_ = NAV_MODE_MAN;
-            continue;
-        }
         if (arg[0] == '-' && arg[1] != '\0') {
             if (target_index != -1) {
                 fprintf(stderr,
