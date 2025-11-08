@@ -24,10 +24,13 @@ static int dispatcher_open_link(const char *link, char **pager_flags,
 static bool is_markdown_path_(const char *path);
 static bool is_manpage_path_(const char *path);
 static bool is_url_(const char *target);
+static bool parse_man_uri_(const char *uri, char **name_out, char **section_out);
 static int run_markdown_stream_(const char *path, char **pager_flags,
                                 int pager_flag_count);
 static int run_man_stream_(const char *path, char **pager_flags,
                            int pager_flag_count);
+static int run_man_lookup_(const char *name, const char *section,
+                           char **pager_flags, int pager_flag_count);
 static int launch_browser_(const char *link);
 static char *strip_fragment_(const char *link);
 static int run_simple_command_(char *const argv[]);
@@ -138,6 +141,18 @@ dispatcher_handle_arguments(int argc, char *argv[])
 
     char *target = argv[target_index];
 
+    if (strncmp(target, "man://", 6) == 0) {
+        char *name    = NULL;
+        char *section = NULL;
+        if (!parse_man_uri_(target, &name, &section))
+            return EXIT_FAILURE;
+        nav_set_document_path(target);
+        int rc = run_man_lookup_(name, section, pager_flags, pager_flag_count);
+        free(name);
+        free(section);
+        return rc;
+    }
+
     if (is_url_(target))
         return dispatcher_open_link(target, pager_flags, pager_flag_count);
 
@@ -182,6 +197,18 @@ dispatcher_open_link(const char *link, char **pager_flags, int pager_flag_count)
             rc = pager_invoke_(path, pager_flags, pager_flag_count);
         }
         free(path);
+        return rc;
+    }
+
+    if (strncmp(link, "man://", 6) == 0) {
+        char *name    = NULL;
+        char *section = NULL;
+        if (!parse_man_uri_(link, &name, &section))
+            return EXIT_FAILURE;
+        nav_set_document_path(link);
+        int rc = run_man_lookup_(name, section, pager_flags, pager_flag_count);
+        free(name);
+        free(section);
         return rc;
     }
 
@@ -268,6 +295,52 @@ is_url_(const char *target)
     if (colon[1] == '/' && colon[2] == '/')
         return true;
     return false;
+}
+
+static bool
+parse_man_uri_(const char *uri, char **name_out, char **section_out)
+{
+    if (!uri || strncmp(uri, "man://", 6) != 0)
+        return false;
+
+    const char *payload = uri + 6;
+    if (!*payload) {
+        fprintf(stderr, "mess: invalid man URI '%s'\n", uri);
+        return false;
+    }
+
+    const char *dot = strrchr(payload, '.');
+    if (!dot || dot == payload || dot[1] == '\0') {
+        fprintf(stderr, "mess: invalid man URI '%s'\n", uri);
+        return false;
+    }
+
+    size_t name_len = (size_t)(dot - payload);
+    char *name      = strndup(payload, name_len);
+    if (!name) {
+        perror("strndup");
+        return false;
+    }
+
+    const char *section_src = dot + 1;
+    for (const char *p = section_src; *p; ++p) {
+        if (!isalnum((unsigned char) * p)) {
+            fprintf(stderr, "mess: invalid man section in '%s'\n", uri);
+            free(name);
+            return false;
+        }
+    }
+
+    char *section = strdup(section_src);
+    if (!section) {
+        perror("strdup");
+        free(name);
+        return false;
+    }
+
+    *name_out    = name;
+    *section_out = section;
+    return true;
 }
 
 // Pipe lowdown output into the pager for the provided file/args.
@@ -372,6 +445,76 @@ run_man_stream_(const char *path, char **pager_flags, int pager_flag_count)
         execlp("mandoc", "mandoc", "-T", "utf8", path, (char *)NULL);
         execlp("cat", "cat", path, (char *)NULL);
         perror("exec man/mandoc/cat");
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+    int saved_stdin = dup(STDIN_FILENO);
+    if (saved_stdin == -1) {
+        perror("dup stdin");
+        close(pipefd[0]);
+        (void)waitpid(pid, NULL, 0);
+        return EXIT_FAILURE;
+    }
+
+    if (dup2(pipefd[0], STDIN_FILENO) == -1) {
+        perror("dup2 stdin");
+        close(pipefd[0]);
+        close(saved_stdin);
+        (void)waitpid(pid, NULL, 0);
+        return EXIT_FAILURE;
+    }
+    close(pipefd[0]);
+
+    int rc = pager_invoke_(NULL, pager_flags, pager_flag_count);
+
+    if (dup2(saved_stdin, STDIN_FILENO) == -1)
+        perror("restore stdin");
+    close(saved_stdin);
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) == -1) {
+        perror("waitpid man");
+        return EXIT_FAILURE;
+    }
+    if (rc == 0) {
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            rc = EXIT_FAILURE;
+    }
+    return rc;
+}
+
+static int
+run_man_lookup_(const char *name, const char *section, char **pager_flags,
+                int pager_flag_count)
+{
+    if (!name || !section)
+        return EXIT_FAILURE;
+
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        perror("pipe");
+        return EXIT_FAILURE;
+    }
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("fork");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return EXIT_FAILURE;
+    }
+
+    if (pid == 0) {
+        if (dup2(pipefd[1], STDOUT_FILENO) == -1) {
+            perror("dup2");
+            _exit(127);
+        }
+        close(pipefd[0]);
+        close(pipefd[1]);
+        execlp("man", "man", section, name, (char *)NULL);
+        execlp("man", "man", name, (char *)NULL);
+        perror("exec man");
         _exit(127);
     }
 

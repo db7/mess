@@ -46,6 +46,14 @@ without launching the interactive pager. Markdown inputs are rendered through
 .I file://
 URLs are normalised and reopened in
 .BR mess ,
+strings beginning with
+.I man://
+are resolved via
+.BR man (1)
+so
+.I man://mess.1
+looks up
+.BR mess (1),
 and other targets are dispatched to a web browser.
 .TP
 .BR --help ", " -h
