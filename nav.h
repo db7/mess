@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <sys/types.h>
+#include <sys/time.h>
 
 // maximum number of URLS to be kept in memory
 #define MAX_URLS 10
@@ -75,6 +76,17 @@ bool nav_freeze_enabled(void);
 void nav_toggle_freeze(void);
 void nav_set_output_dirty(bool dirty);
 
+// Snapshot management for navigation mode highlighting.
+void nav_begin_snapshot(void);
+bool nav_snapshot_collecting(void);
+void nav_append_snapshot(const char *data, size_t len);
+bool nav_snapshot_ready(void);
+bool nav_snapshot_timeout(struct timeval *tv);
+bool nav_snapshot_finish(void);
+void nav_emit_snapshot(void);
+void nav_drop_snapshot(void);
+void nav_set_snapshot_idle_timeout_ms(long ms);
+
 // Toggle between supported navigation parsers.
 void nav_set_mode(nav_mode_t mode);
 nav_mode_t nav_current_mode(void);
@@ -96,6 +108,8 @@ const char *nav_text_at(int idx);
 
 // Return the currently selected link index, or -1 if nothing selected.
 int nav_selected_index(void);
+// Return whether navigation mode is currently active.
+bool nav_mode_active(void);
 // Return whether the navigation status bar is currently visible.
 bool nav_status_visible(void);
 // Return true if the pager should receive a redraw request (Ctrl-L equivalent).

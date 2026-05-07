@@ -1,7 +1,11 @@
 .POSIX:
 
-VERSION=	0.1.0
 TARGETS=	mess
+MANPAGE=	mess.1
+VERSION_HDR=	version.h
+
+MESS_SRCS=	main.c dispatcher.c pager.c nav.c readq.c uri.c
+MESS_HDRS=	dispatcher.h pager.h nav.h readq.h uri.h
 
 TESTS_SRC=	tests/test-nav.c \
 		tests/test-parser.c \
@@ -15,8 +19,6 @@ TESTS_BIN=	tests/test-nav.bin \
 
 CFLAGS=		-O2 -g
 CFLAGS+= 	-I. -std=c11 -Wall -Wextra -Werror
-CFLAGS+=	-DMESS_VERSION=\"$(VERSION)\"
-
 
 OS=		$(shell uname -s)
 CSOURCE=	$(shell if [ $(OS) = Linux ]; then echo _GNU_SOURCE; \
@@ -34,12 +36,25 @@ BINDIR=		$(PREFIX)/bin
 MANDIR=		$(PREFIX)/share/man
 INSTALL=	install
 
-.PHONY: all clean test install
-all: $(TARGETS) $(TESTS_BIN)
+.PHONY: all clean test install coverage coverage-info format
+all: $(TARGETS) $(TESTS_BIN) $(MANPAGE)
 
 clean:
-	rm -rf $(TARGETS) $(TESTS_BIN)
+	rm -rf $(TARGETS) $(TESTS_BIN) $(VERSION_HDR) $(MANPAGE)
 	rm -rf *.dSYM tests/*.dSYM tests/integration/*.dSYM
+	rm -rf *.gcno tests/*.gcno tests/integration/*.gcno
+	rm -rf *.gcda tests/*.gcda tests/integration/*.gcda
+	rm -rf *.gcov tests/*.gcov tests/integration/*.gcov
+
+version.h: version.h.in
+	./versionize.sh version.h.in > $@
+
+mess.1: mess.1.in
+	./versionize.sh mess.1.in > $@
+
+mess: $(MESS_SRCS) version.h
+	$(CC) $(CFLAGS) -o $@ $(MESS_SRCS) $(LDLIBS)
+
 
 test: $(TARGETS) $(TESTS_BIN)
 	@set -e; \
@@ -55,14 +70,23 @@ test: $(TARGETS) $(TESTS_BIN)
 		tikl -v -c tests/dispatcher/tikl.conf $$f; \
 	done
 
-mess: main.c dispatcher.c pager.c nav.c readq.c uri.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+coverage:
+	@$(MAKE) clean
+	@$(MAKE) CFLAGS="$(CFLAGS) -fprofile-arcs -ftest-coverage" LDFLAGS="$(LDFLAGS) -fprofile-arcs -ftest-coverage"
+	@$(MAKE) test
 
-install: mess mess.1
+coverage-info:
+	@if ! command -v gcovr >/dev/null 2>&1; then \
+		echo "gcovr not found. Please install gcovr to generate coverage summaries." >&2; \
+		exit 1; \
+	fi
+	@gcovr --root . --exclude-directories tikl
+
+install: mess $(MANPAGE)
 	$(INSTALL) -d "$(DESTDIR)$(BINDIR)"
 	$(INSTALL) -m 755 mess "$(DESTDIR)$(BINDIR)/mess"
 	$(INSTALL) -d "$(DESTDIR)$(MANDIR)/man1"
-	$(INSTALL) -m 644 mess.1 "$(DESTDIR)$(MANDIR)/man1/mess.1"
+	$(INSTALL) -m 644 $(MANPAGE) "$(DESTDIR)$(MANDIR)/man1/mess.1"
 
 tests/test-%.bin: tests/test-%.c nav.c readq.c uri.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)

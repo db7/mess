@@ -1,5 +1,5 @@
-#include "pager.h"
 #include "nav.h"
+#include "pager.h"
 #include "readq.h"
 
 #include <errno.h>
@@ -33,9 +33,14 @@ static void change_terminal_size_(int fd, int rows, int cols);
 static void get_terminal_size_(int fd, int *rows, int *cols);
 static bool handle_tty_input_(int child_fd, struct readq *tty_q, pid_t child);
 static bool handle_child_output_(struct readq *child_q);
+static bool handle_upstream_input_(int child_fd, int upstream_fd, bool *done);
 static bool install_winch_(void);
 static void handle_sigint_(int sig);
 static void handle_winch_signal_(int sig);
+static char *capture_stdin_to_temp_(void);
+static void cleanup_capture_path_(char *path);
+static bool append_arg_(char ***argvp, const char *arg);
+static void configure_snapshot_timeout_(void);
 
 static int winch_fd_;
 static struct termios saved_term_;
@@ -90,13 +95,22 @@ free_pager_command_(char **argv)
     free(argv);
 }
 
-static int pager_run_interactive_(char **pager_cmd);
+static int pager_run_interactive_(char **pager_cmd, bool forward_stdin);
 static int pager_run_piped_(char **pager_cmd);
 
 int
 pager_run(int parse_flags)
 {
+    // stdin stays a TTY when mess runs without upstream piping (e.g. invoked
+    // directly from the shell or as a pager with the caller leaving stdin on
+    // the controlling terminal), so we still need to handle that path.
+    bool stdin_is_tty  = isatty(STDIN_FILENO);
+    char *capture_path = NULL;
+    if (!stdin_is_tty)
+        capture_path = capture_stdin_to_temp_();
+
     nav_reset();
+    configure_snapshot_timeout_();
     if (parse_flags & PAGER_PARSE_MAN)
         nav_set_mode(NAV_MODE_MAN);
     else
@@ -107,17 +121,38 @@ pager_run(int parse_flags)
     if (build_pager_command_(&pager_cmd) != 0)
         return -1;
 
-    bool interactive = isatty(STDIN_FILENO);
-    int rc           = interactive ? pager_run_interactive_(pager_cmd)
-                                   : pager_run_piped_(pager_cmd);
+    if (capture_path) {
+        if (!append_arg_(&pager_cmd, capture_path)) {
+            cleanup_capture_path_(capture_path);
+            free_pager_command_(pager_cmd);
+            return -1;
+        }
+    }
+
+    bool interactive = stdin_is_tty || (capture_path && isatty(STDOUT_FILENO));
+    bool forward_stdin = (!stdin_is_tty && capture_path == NULL);
+    int rc = interactive ? pager_run_interactive_(pager_cmd, forward_stdin) :
+                           pager_run_piped_(pager_cmd);
     free_pager_command_(pager_cmd);
+    cleanup_capture_path_(capture_path);
     return rc;
+}
+static void
+configure_snapshot_timeout_(void)
+{
+    const char *env = getenv("MESS_SNAPSHOT_IDLE_MS");
+    if (!env || !*env)
+        return;
+    char *end = NULL;
+    long val  = strtol(env, &end, 10);
+    if (end == env)
+        return;
+    nav_set_snapshot_idle_timeout_ms(val);
 }
 
 static int
-pager_run_interactive_(char **pager_cmd)
+pager_run_interactive_(char **pager_cmd, bool forward_stdin)
 {
-
     int master_fd;
     int slave_fd = -1;
 #ifdef __linux__
@@ -204,9 +239,15 @@ pager_run_interactive_(char **pager_cmd)
     struct readq tty_q;
     readq_init(&child_q, master_fd);
     readq_init(&tty_q, tty_fd);
+    int upstream_fd    = forward_stdin ? STDIN_FILENO : -1;
+    bool upstream_done = false;
 
     fd_set readfds;
-    int max_fd = (master_fd > tty_fd) ? master_fd : tty_fd;
+    int max_fd = master_fd;
+    if (tty_fd > max_fd)
+        max_fd = tty_fd;
+    if (upstream_fd > max_fd)
+        max_fd = upstream_fd;
     int err    = 0;
     int status = 0;
 
@@ -215,15 +256,33 @@ pager_run_interactive_(char **pager_cmd)
         if (rv == pid)
             break;
 
+        struct timeval timeout;
+        struct timeval *timeout_ptr = NULL;
+        if (nav_snapshot_collecting()) {
+            if (nav_snapshot_timeout(&timeout)) {
+                timeout_ptr = &timeout;
+            } else if (!nav_snapshot_collecting() && nav_snapshot_ready()) {
+                nav_emit_snapshot();
+            }
+        }
+
         FD_ZERO(&readfds);
         FD_SET(tty_fd, &readfds);
         FD_SET(master_fd, &readfds);
-        if (select(max_fd + 1, &readfds, NULL, NULL, NULL) == -1) {
+        if (upstream_fd != -1 && !upstream_done)
+            FD_SET(upstream_fd, &readfds);
+        int sel = select(max_fd + 1, &readfds, NULL, NULL, timeout_ptr);
+        if (sel == -1) {
             if (errno == EINTR)
                 continue;
             perror("select");
             err = 1;
             break;
+        }
+        if (sel == 0) {
+            if (nav_snapshot_finish() && nav_snapshot_ready())
+                nav_emit_snapshot();
+            continue;
         }
 
         if (FD_ISSET(tty_fd, &readfds)) {
@@ -238,6 +297,17 @@ pager_run_interactive_(char **pager_cmd)
                 err = 1;
                 break;
             }
+        }
+
+        if (upstream_fd != -1 && !upstream_done &&
+            FD_ISSET(upstream_fd, &readfds)) {
+            if (!handle_upstream_input_(master_fd, upstream_fd,
+                                        &upstream_done)) {
+                err = 1;
+                break;
+            }
+            if (upstream_done)
+                upstream_fd = -1;
         }
     }
 
@@ -309,8 +379,8 @@ static void
 change_terminal_size_(int fd, int rows, int cols)
 {
     struct winsize ws;
-    ws.ws_row = rows;
-    ws.ws_col = cols;
+    ws.ws_row    = rows;
+    ws.ws_col    = cols;
     ws.ws_xpixel = 0;
     ws.ws_ypixel = 0;
     ioctl(fd, TIOCSWINSZ, &ws);
@@ -375,6 +445,9 @@ handle_tty_input_(int child_fd, struct readq *tty_queue, pid_t child_pid)
     bool forward =
         nav_process_input(buf, &forward_len, sizeof(tty_queue->buffer));
 
+    // When navigation requests a redraw the pager simulates Ctrl-L by
+    // delivering a SIGWINCH to the child and writing form-feed so we capture
+    // a fresh frame for highlighting.
     if (nav_consume_refresh_request()) {
         if (kill(child_pid, SIGWINCH) == -1 && errno != ESRCH) {
             perror("kill SIGWINCH");
@@ -407,18 +480,135 @@ handle_child_output_(struct readq *bq)
 
     ssize_t nread = nav_process_output(bq);
     if (nread > 0) {
-        char render_buf[READQ_SIZE * 3];
-        size_t render_len =
-            nav_render_highlighted(bq->buffer, (size_t)nread, render_buf,
-                                   sizeof(render_buf));
-        const char *data = render_len ? render_buf : bq->buffer;
-        size_t len       = render_len ? render_len : (size_t)nread;
-        if (write(STDOUT_FILENO, data, len) == -1) {
-            perror("write stdout");
-            return false;
+        bool freeze_output = nav_mode_active() && nav_freeze_enabled();
+        if (freeze_output) {
+            // In frozen navigation mode we buffer a single snapshot. Once it
+            // arrives we replay the highlighted frame ourselves and ignore any
+            // subsequent child output until navigation exits.
+            if (nav_snapshot_collecting()) {
+                // Accumulate the redraw frame until either the producer pauses
+                // (short read) or the snapshot timer fires.
+                nav_append_snapshot(bq->buffer, (size_t)nread);
+                if (readq_last_len(bq) < READQ_SIZE - 1)
+                    nav_snapshot_finish();
+            }
+            if (nav_snapshot_ready())
+                nav_emit_snapshot();
+            nav_set_output_dirty(nav_snapshot_collecting());
+        } else {
+            char render_buf[READQ_SIZE * 3];
+            size_t render_len = nav_render_highlighted(
+                bq->buffer, (size_t)nread, render_buf, sizeof(render_buf));
+            const char *data = render_len ? render_buf : bq->buffer;
+            size_t len       = render_len ? render_len : (size_t)nread;
+            nav_set_output_dirty(false);
+            if (write(STDOUT_FILENO, data, len) == -1) {
+                perror("write stdout");
+                return false;
+            }
         }
         nav_render_status();
     }
     bq->start = bq->end = 0;
+    return true;
+}
+
+static bool
+handle_upstream_input_(int child_fd, int upstream_fd, bool *done)
+{
+    char buffer[READQ_SIZE];
+    ssize_t n = read(upstream_fd, buffer, sizeof(buffer));
+    if (n > 0) {
+        ssize_t written = 0;
+        while (written < n) {
+            ssize_t w =
+                write(child_fd, buffer + written, (size_t)(n - written));
+            if (w == -1) {
+                if (errno == EINTR)
+                    continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    continue;
+                perror("write upstream");
+                return false;
+            }
+            written += w;
+        }
+        return true;
+    }
+    if (n == 0) {
+        const char eot = 4;
+        (void)write(child_fd, &eot, 1);
+        if (done)
+            *done = true;
+        return true;
+    }
+    if (errno == EINTR || errno == EAGAIN)
+        return true;
+    perror("read upstream");
+    return false;
+}
+
+static char *
+capture_stdin_to_temp_(void)
+{
+    static const char tpl[] = "/tmp/mess-input-XXXXXX";
+    char path[sizeof(tpl)];
+    memcpy(path, tpl, sizeof(tpl));
+
+    int fd = mkstemp(path);
+    if (fd == -1)
+        return NULL;
+
+    char buffer[8192];
+    ssize_t n;
+    while ((n = read(STDIN_FILENO, buffer, sizeof(buffer))) > 0) {
+        ssize_t written = 0;
+        while (written < n) {
+            ssize_t w = write(fd, buffer + written, (size_t)(n - written));
+            if (w == -1) {
+                if (errno == EINTR)
+                    continue;
+                goto fail;
+            }
+            written += w;
+        }
+    }
+    if (n == -1)
+        goto fail;
+    if (lseek(fd, 0, SEEK_SET) == -1)
+        goto fail;
+    close(fd);
+    return strdup(path);
+fail:
+    close(fd);
+    unlink(path);
+    return NULL;
+}
+
+static void
+cleanup_capture_path_(char *path)
+{
+    if (!path)
+        return;
+    unlink(path);
+    free(path);
+}
+
+static bool
+append_arg_(char ***argvp, const char *arg)
+{
+    if (!argvp || !*argvp || !arg)
+        return false;
+    size_t count = 0;
+    while ((*argvp)[count])
+        count++;
+    char **newv = realloc(*argvp, (count + 2) * sizeof(char *));
+    if (!newv)
+        return false;
+    newv[count] = strdup(arg);
+    if (!newv[count])
+        return false;
+    newv[count + 1] = NULL;
+    *argvp          = newv;
     return true;
 }

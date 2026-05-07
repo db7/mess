@@ -18,10 +18,14 @@ main(int argc, char **argv)
     printf("\n");
     const char *messfile = getenv("MESSFILE");
     printf("MESSFILE=%s\n", messfile ? messfile : "(null)");
+    const char *path = (argc > 1) ? argv[1] : NULL;
+    FILE *fp         = path ? fopen(path, "r") : stdin;
     char line[512];
-    if (fgets(line, sizeof line, stdin))
+    if (fp && fgets(line, sizeof line, fp))
         printf("FIRST:%s", line);
     else
         printf("FIRST:\n");
+    if (fp && fp != stdin)
+        fclose(fp);
     return 0;
 }

@@ -43,6 +43,9 @@ static const char CYCLE_SCENARIO_SAMPLE_[] =
     "\x1b]8;;https://l1.example\x1b\\L1 second\x1b]8;;\x1b\\ "
     "\x1b]8;;https://l4.example\x1b\\L4\x1b]8;;\x1b\\";
 
+static const char MAN_COLORED_SAMPLE_[] =
+    "See \x1b[1;94mwordexp(3)\x1b[0m for details.\n";
+
 static int
 fake_launcher_(const char *link, const char *text)
 {
@@ -122,6 +125,20 @@ prepare_cycle_scenario_(void)
     memcpy(queue.buffer, CYCLE_SCENARIO_SAMPLE_, len);
     queue.start = 0;
     queue.end = len;
+    queue.buffer[len] = '\0';
+    nav_process_output(&queue);
+}
+
+static void
+prepare_colored_man_sample_(void)
+{
+    struct readq queue;
+    readq_init(&queue, -1);
+    size_t len = strlen(MAN_COLORED_SAMPLE_);
+    assert(len < READQ_SIZE);
+    memcpy(queue.buffer, MAN_COLORED_SAMPLE_, len);
+    queue.start = 0;
+    queue.end   = len;
     queue.buffer[len] = '\0';
     nav_process_output(&queue);
 }
@@ -236,6 +253,30 @@ test_regular_keys_pass_through_(void)
     bool forwarded = nav_hit_('x');
     assert(forwarded);
     assert(nav_selected_index() == -1);
+}
+
+static void
+test_tab_enters_mode_without_links_(void)
+{
+    nav_reset();
+    nav_set_launcher(fake_launcher_);
+    nav_set_document_path(NULL);
+
+    bool forwarded = nav_hit_('\t');
+    assert(!forwarded);
+    assert(nav_selected_index() == -1);
+    assert(nav_mode_active());
+
+    forwarded = nav_hit_('x');
+    assert(!forwarded);
+
+    forwarded = nav_hit_('\e');
+    assert(!forwarded);
+    assert(nav_selected_index() == -1);
+    assert(!nav_mode_active());
+
+    forwarded = nav_hit_('x');
+    assert(forwarded);
 }
 
 static void
@@ -406,6 +447,30 @@ test_cycle_groups_sequence_(void)
 }
 
 static void
+test_man_colored_token_stripping_(void)
+{
+    nav_reset();
+    nav_set_mode(NAV_MODE_MAN);
+    nav_set_launcher(fake_launcher_);
+    nav_set_document_path(NULL);
+    prepare_colored_man_sample_();
+
+    assert(nav_link_count() == 1);
+    const char *link = nav_link_at(0);
+    const char *text = nav_text_at(0);
+    assert(link && text);
+    assert(strcmp(link, "man://wordexp.3") == 0);
+    assert(strcmp(text, "wordexp(3)") == 0);
+
+    (void)nav_hit_('\t');
+    assert(nav_selected_index() == 0);
+
+    char rendered[256];
+    render_highlighted_sample_(MAN_COLORED_SAMPLE_, rendered, sizeof(rendered));
+    assert(strstr(rendered, "\x1b[1;94m\x1b[7mwordexp(3)\x1b[27m\x1b[0m") != NULL);
+}
+
+static void
 test_escape_exits_selection_(void)
 {
     nav_reset();
@@ -503,11 +568,13 @@ main(void)
     test_shift_tab_handles_split_sequence_();
     test_enter_triggers_launcher_();
     test_regular_keys_pass_through_();
+    test_tab_enters_mode_without_links_();
     test_regular_keys_keep_selection_();
     test_cycle_skips_duplicate_links_();
     test_cycle_handles_single_link_();
     test_highlight_contiguous_duplicates_();
     test_cycle_groups_sequence_();
+    test_man_colored_token_stripping_();
     test_escape_exits_selection_();
     test_v_opens_editor_when_document_set_();
     test_v_passes_through_without_document_();

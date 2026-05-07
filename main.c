@@ -1,5 +1,6 @@
 #include "dispatcher.h"
 #include "pager.h"
+#include "version.h"
 
 #include <getopt.h>
 #include <stdbool.h>
@@ -66,7 +67,7 @@ main(int argc, char *argv[])
     }
 
     if (open_arg)
-        return dispatcher_open(open_arg);
+        return dispatcher_run(open_arg);
 
     if (optind < argc)
         return dispatcher_run(argv[optind]);

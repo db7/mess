@@ -18,6 +18,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <wordexp.h>
 
@@ -43,6 +44,8 @@ static int url_head_;
 // Reason: Cache the logical selection index; -1 means navigation mode is
 // inactive.
 static int selected_idx_ = -1;
+// Reason: Track whether navigation mode is active even when no link is selected.
+static bool nav_active_;
 // Reason: Remember which launcher should open links when activated.
 static nav_launcher_fn current_launcher_;
 // Reason: Track whether the UI needs to trigger a redraw of the pager content.
@@ -72,6 +75,13 @@ static bool force_drain_;
 static bool colorize_links_;
 static bool freeze_enabled_ = true;
 static bool output_dirty_;
+static char *snapshot_buf_;
+static size_t snapshot_len_;
+static bool snapshot_pending_;
+static bool snapshot_ready_;
+static bool snapshot_deadline_set_;
+static struct timespec snapshot_deadline_;
+static long snapshot_idle_ms_ = 120;
 // Reason: Distinct ANSI palettes for link markers/highlighting.
 static const char *const link_color_table_[] = {
     "\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m",
@@ -143,6 +153,9 @@ static bool man_is_section_char_(char ch);
 #define SHIFT_TAB_SEQ_LEN         3
 #define SHIFT_TAB_POLL_TIMEOUT_MS 10
 
+static void free_snapshot_(void);
+static void snapshot_set_deadline_ms_(long ms);
+
 // Reason: Helper to opportunistically pull more bytes for multi-byte escape
 // detection.
 static ssize_t read_more_input_(char *dest, size_t max);
@@ -170,7 +183,7 @@ nav_process_input(char *c, ssize_t *nread, size_t capacity)
         // navigation input.
         char ch = c[idx];
 
-        if (selected_idx_ != -1 && status_pending_hide_) {
+        if (nav_active_ && status_pending_hide_) {
             if (status_mode_ != STATUS_NONE) {
                 nav_clear_status();
                 did_render = true;
@@ -216,6 +229,7 @@ nav_process_input(char *c, ssize_t *nread, size_t capacity)
                 // Reason: Shift-Tab cycles the selection backwards through
                 // discovered links.
                 cycle_link_selection_(-1);
+                nav_emit_snapshot();
                 did_render = true;
                 idx += SHIFT_TAB_SEQ_LEN;
                 continue;
@@ -227,7 +241,7 @@ nav_process_input(char *c, ssize_t *nread, size_t capacity)
             // re-render.
             did_render = true;
         } else {
-            if (selected_idx_ == -1) {
+            if (!nav_active_) {
                 // Reason: When navigation mode is inactive, pass the byte
                 // through unchanged.
                 c[out_idx++] = ch;
@@ -309,11 +323,15 @@ handle_key_input_(char key)
     if (key == '\t') {
         // Reason: Tab advances to the next hyperlink in logical order.
         bool moved = cycle_link_selection_(+1);
+        if (moved)
+            nav_emit_snapshot();
         return moved;
     } else if (key == '\b' || key == '\x7f' || key == 'k' || key == 'K') {
         bool moved = cycle_link_selection_(-1);
+        if (moved)
+            nav_emit_snapshot();
         return moved;
-    } else if (key == '\n' && selected_idx_ != -1) {
+    } else if (key == '\n' && nav_active_ && selected_idx_ != -1) {
         // Reason: Enter activates the highlighted link through the configured
         // launcher.
         int physical = logical_to_physical_(selected_idx_);
@@ -324,31 +342,31 @@ handle_key_input_(char key)
             // nav_render_status();
         }
     } else if (key == '\e' || key == '\f') {
-        if (selected_idx_ == -1)
+        if (!nav_active_)
             return false;
         // Reason: Escape abandons navigation mode and restores normal input
         // handling.
         leave_navigation_mode_(true);
         return true;
     } else if (key == 's' || key == 'S') {
-        if (selected_idx_ == -1)
+        if (!nav_active_ || selected_idx_ == -1)
             return false;
         status_mode_         = STATUS_LINK;
         status_pending_hide_ = true;
         return true;
     } else if (key == 'c' || key == 'C') {
-        if (selected_idx_ == -1)
+        if (!nav_active_ || selected_idx_ == -1)
             return false;
         colorize_links_ = !colorize_links_;
         nav_request_refresh();
         return true;
     } else if (key == 'D') {
-        if (selected_idx_ == -1)
+        if (!nav_active_ || selected_idx_ == -1)
             return false;
         toggle_debug_overlay_();
         return true;
     } else if (key == 'x' || key == 'X') {
-        if (selected_idx_ == -1)
+        if (!nav_active_ || selected_idx_ == -1)
             return false;
         nav_toggle_freeze();
         return true;
@@ -447,15 +465,24 @@ next_group_start_(int idx, int direction)
 static bool
 cycle_link_selection_(int direction)
 {
-    bool was_active = (selected_idx_ >= 0);
+    bool was_active = nav_active_;
     if (url_count_ == 0) {
         // Reason: Without any stored URLs there is nothing to select or render.
         selected_idx_ = -1;
-        nav_clear_status();
-        render_nav_mode_pip_(false);
+        nav_active_   = true;
+        if (!was_active)
+            nav_begin_snapshot();
+        if (status_mode_ != STATUS_NONE)
+            nav_clear_status();
+        if (!was_active) {
+            render_nav_mode_pip_(true);
+            request_nav_pip_refresh_();
+        }
+        nav_request_refresh();
         return false;
     }
 
+    nav_active_ = true;
     if (selected_idx_ < 0 || selected_idx_ >= url_count_) {
         // Reason: Wrap from an invalid selection to the edge element requested
         // by the direction.
@@ -464,12 +491,14 @@ cycle_link_selection_(int direction)
     } else {
         selected_idx_ = next_group_start_(selected_idx_, direction);
     }
+    if (!was_active)
+        nav_begin_snapshot();
     if (status_mode_ != STATUS_NONE)
         nav_clear_status();
-    if (!was_active && selected_idx_ >= 0) {
+    if (!was_active && nav_active_) {
         render_nav_mode_pip_(true);
         request_nav_pip_refresh_();
-    } else if (was_active && selected_idx_ < 0) {
+    } else if (was_active && !nav_active_) {
         render_nav_mode_pip_(false);
     }
     // Reason: Any selection change should mark the UI for refresh.
@@ -1041,19 +1070,43 @@ man_strip_overstrike_(const char *data, size_t len, char *dest, size_t dest_cap,
     if (!data || !dest || dest_cap == 0)
         return 0;
     size_t out = 0;
-    for (size_t i = 0; i < len; ++i) {
-        char ch = data[i];
+
+    size_t i = 0;
+    while (i < len) {
+        unsigned char ch = (unsigned char)data[i];
         if (ch == '\b') {
             if (out > 0)
                 out--;
+            i++;
+            continue;
+        }
+        if (ch == '\x1b') {
+            size_t seq_end = i + 1;
+            if (seq_end < len) {
+                unsigned char next = (unsigned char)data[seq_end];
+                if (next == '[') {
+                    seq_end++;
+                    while (seq_end < len) {
+                        unsigned char c = (unsigned char)data[seq_end++];
+                        if (c >= '@' && c <= '~')
+                            break;
+                    }
+                } else {
+                    seq_end++;
+                }
+            }
+            if (seq_end > len)
+                seq_end = len;
+            i = seq_end;
             continue;
         }
         if (out >= dest_cap)
             break;
-        dest[out] = ch;
+        dest[out] = (char)ch;
         if (map)
             map[out] = i;
         out++;
+        i++;
     }
     return out;
 }
@@ -1170,6 +1223,7 @@ nav_reset(void)
 {
     // Reason: Exit navigation mode without forcing a status redraw.
     leave_navigation_mode_(false);
+    nav_drop_snapshot();
     // Reason: Release all dynamic link data before clearing the ring buffer
     // counters.
     for (int i = 0; i < MAX_URLS; ++i) {
@@ -1179,6 +1233,7 @@ nav_reset(void)
     url_count_           = 0;
     url_head_            = 0;
     selected_idx_        = -1;
+    nav_active_          = false;
     current_launcher_    = launch_with_mess_;
     editor_launcher_     = launch_with_editor_;
     needs_refresh_       = false;
@@ -1191,6 +1246,7 @@ nav_reset(void)
     pip_needs_redraw_     = false;
     freeze_enabled_      = true;
     output_dirty_        = false;
+    nav_mode_            = NAV_MODE_OSC8;
 }
 
 void
@@ -1441,15 +1497,17 @@ nav_clear_status(void)
 void
 nav_render_status(void)
 {
-    if (status_mode_ == STATUS_NONE)
+    if (status_mode_ == STATUS_NONE) {
+        maybe_render_nav_pip_();
         return;
+    }
     if (status_mode_ == STATUS_HELP) {
         write_status_line_(NULL, (size_t)-1, STATUS_HELP);
         return;
     }
     if (status_mode_ == STATUS_DEBUG) {
         render_debug_overlay_lines_();
-        render_nav_mode_pip_(selected_idx_ >= 0);
+        render_nav_mode_pip_(nav_active_);
         pip_needs_redraw_ = false;
         return;
     }
@@ -1499,6 +1557,172 @@ nav_set_output_dirty(bool dirty)
         return;
     output_dirty_ = dirty;
     request_nav_pip_refresh_();
+}
+
+static void
+free_snapshot_(void)
+{
+    free(snapshot_buf_);
+    snapshot_buf_ = NULL;
+    snapshot_len_ = 0;
+}
+
+static void
+snapshot_set_deadline_ms_(long ms)
+{
+    if (ms <= 0) {
+        snapshot_deadline_set_ = false;
+        return;
+    }
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        snapshot_deadline_set_ = false;
+        return;
+    }
+
+    snapshot_deadline_ = now;
+    snapshot_deadline_.tv_sec += ms / 1000;
+    long extra_nsec = (ms % 1000) * 1000000L;
+    snapshot_deadline_.tv_nsec += extra_nsec;
+    if (snapshot_deadline_.tv_nsec >= 1000000000L) {
+        snapshot_deadline_.tv_sec += 1;
+        snapshot_deadline_.tv_nsec -= 1000000000L;
+    }
+    snapshot_deadline_set_ = true;
+}
+
+void
+nav_begin_snapshot(void)
+{
+    free_snapshot_();
+    snapshot_pending_      = true;
+    snapshot_ready_        = false;
+    snapshot_deadline_set_ = false;
+}
+
+bool
+nav_snapshot_collecting(void)
+{
+    return snapshot_pending_;
+}
+
+bool
+nav_snapshot_ready(void)
+{
+    return snapshot_ready_;
+}
+
+void
+nav_append_snapshot(const char *data, size_t len)
+{
+    if (!snapshot_pending_ || !data || len == 0)
+        return;
+
+    char *newbuf = realloc(snapshot_buf_, snapshot_len_ + len);
+    if (!newbuf) {
+        nav_drop_snapshot();
+        return;
+    }
+
+    snapshot_buf_ = newbuf;
+    memcpy(snapshot_buf_ + snapshot_len_, data, len);
+    snapshot_len_ += len;
+    snapshot_set_deadline_ms_(snapshot_idle_ms_);
+}
+
+bool
+nav_snapshot_timeout(struct timeval *tv)
+{
+    if (!snapshot_pending_ || !snapshot_deadline_set_ || !tv)
+        return false;
+
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return false;
+
+    time_t sec_diff = snapshot_deadline_.tv_sec - now.tv_sec;
+    long nsec_diff  = snapshot_deadline_.tv_nsec - now.tv_nsec;
+    if (nsec_diff < 0) {
+        sec_diff--;
+        nsec_diff += 1000000000L;
+    }
+    if (sec_diff < 0 || (sec_diff == 0 && nsec_diff <= 0)) {
+        nav_snapshot_finish();
+        return false;
+    }
+
+    tv->tv_sec  = sec_diff;
+    tv->tv_usec = (suseconds_t)(nsec_diff / 1000L);
+    if (tv->tv_sec == 0 && tv->tv_usec == 0)
+        tv->tv_usec = 1;
+    return true;
+}
+
+bool
+nav_snapshot_finish(void)
+{
+    if (!snapshot_pending_)
+        return false;
+
+    snapshot_pending_      = false;
+    snapshot_deadline_set_ = false;
+
+    if (snapshot_len_ == 0) {
+        snapshot_ready_ = false;
+        return false;
+    }
+
+    snapshot_ready_ = true;
+    return true;
+}
+
+void
+nav_emit_snapshot(void)
+{
+    if (!snapshot_ready_ || !snapshot_buf_ || snapshot_len_ == 0)
+        return;
+
+    size_t cap = snapshot_len_ * 3;
+    if (cap == 0)
+        return;
+
+    char *render = malloc(cap);
+    const char *out = snapshot_buf_;
+    size_t out_len  = snapshot_len_;
+    if (render) {
+        size_t rendered =
+            nav_render_highlighted(snapshot_buf_, snapshot_len_, render, cap);
+        if (rendered > 0) {
+            out     = render;
+            out_len = rendered;
+        } else {
+            free(render);
+            render = NULL;
+        }
+    }
+    if (out_len > 0)
+        (void)write(STDOUT_FILENO, out, out_len);
+    if (render)
+        free(render);
+    nav_set_output_dirty(false);
+    nav_render_status();
+}
+
+void
+nav_drop_snapshot(void)
+{
+    snapshot_pending_ = false;
+    snapshot_ready_   = false;
+    snapshot_deadline_set_ = false;
+    free_snapshot_();
+}
+
+void
+nav_set_snapshot_idle_timeout_ms(long ms)
+{
+    if (ms < 0)
+        ms = 0;
+    snapshot_idle_ms_ = ms;
 }
 
 static void
@@ -1670,8 +1894,7 @@ render_nav_mode_pip_(bool active)
     size_t extra_len = 0;
     if (freeze_enabled_)
         extras[extra_len++] = 'F';
-    if (output_dirty_)
-        extras[extra_len++] = '!';
+    extras[extra_len++] = output_dirty_ ? '!' : ' ';
     extras[extra_len] = '\0';
     size_t total_len  = strlen(label) + extra_len;
     int start_col      = ws.ws_col - (int)total_len + 1;
@@ -1709,7 +1932,7 @@ maybe_render_nav_pip_(void)
 {
     if (!pip_needs_redraw_)
         return;
-    render_nav_mode_pip_(selected_idx_ >= 0);
+    render_nav_mode_pip_(nav_active_);
     pip_needs_redraw_ = false;
 }
 
@@ -1750,6 +1973,12 @@ nav_selected_index(void)
     // Reason: The caller may need to highlight or inspect the current
     // selection.
     return selected_idx_;
+}
+
+bool
+nav_mode_active(void)
+{
+    return nav_active_;
 }
 
 bool
@@ -1851,12 +2080,14 @@ nav_set_input_fd(int fd)
 static void
 leave_navigation_mode_(bool request_refresh)
 {
-    if (selected_idx_ == -1)
+    if (!nav_active_)
         return;
     selected_idx_ = -1;
+    nav_active_   = false;
     if (request_refresh)
         nav_request_refresh();
     nav_clear_status();
+    nav_drop_snapshot();
     render_nav_mode_pip_(false);
     pip_needs_redraw_ = false;
 }

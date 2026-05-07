@@ -23,22 +23,19 @@ static int run_markdown_file_(const char *path);
 static int run_pager_file_(const char *path);
 static int run_browser_(const char *link);
 static int run_simple_(char *const argv[]);
+static int run_simple_with_stdin_(char *const argv[], int fd);
 static int build_command_from_env_(const char *env, const char *fallback,
                                    wordexp_t *we);
 static int wait_for_child_(pid_t pid);
 static const char *default_pager_(void);
 static const char *default_browser_(void);
 static const char *default_markdown_renderer_(void);
+static const char *pager_command_env_(void);
+static bool pager_is_self_(const char *cmd);
 static void ensure_manpager_(void);
 static char *shell_quote_(const char *text);
 static char self_path_[PATH_MAX];
 static bool have_self_path_;
-
-int
-dispatcher_open(const char *target)
-{
-    return dispatcher_run(target);
-}
 
 int
 dispatcher_run(const char *target)
@@ -61,17 +58,17 @@ dispatcher_run(const char *target)
     }
 
     switch (info.type) {
-    case URI_KIND_BROWSER:
-        return run_browser_(info.raw);
-    case URI_KIND_MAN_TOPIC:
-        return run_man_topic_(info.man.name, info.man.section);
-    case URI_KIND_MARKDOWN_FILE:
-        return run_markdown_file_(info.path);
-    case URI_KIND_MAN_FILE:
-        return run_man_file_(info.path);
-    case URI_KIND_FILE:
-    default:
-        return run_pager_file_(info.path);
+        case URI_KIND_BROWSER:
+            return run_browser_(info.raw);
+        case URI_KIND_MAN_TOPIC:
+            return run_man_topic_(info.man.name, info.man.section);
+        case URI_KIND_MARKDOWN_FILE:
+            return run_markdown_file_(info.path);
+        case URI_KIND_MAN_FILE:
+            return run_man_file_(info.path);
+        case URI_KIND_FILE:
+        default:
+            return run_pager_file_(info.path);
     }
 }
 
@@ -99,7 +96,17 @@ set_messfile_env_(const char *path)
 static const char *
 default_pager_(void)
 {
-    return "less";
+    static char fallback[PATH_MAX * 2];
+    if (!fallback[0] && have_self_path_) {
+        char *quoted = shell_quote_(self_path_);
+        if (quoted) {
+            (void)snprintf(fallback, sizeof(fallback), "%s -m -o", quoted);
+            free(quoted);
+        }
+    }
+    if (fallback[0])
+        return fallback;
+    return "mess -m -o";
 }
 
 static const char *
@@ -117,6 +124,35 @@ default_markdown_renderer_(void)
 {
     return "lowdown -tterm --term-no-links";
 }
+
+static const char *
+pager_command_env_(void)
+{
+    const char *cmd = getenv("MESSPAGER");
+    if (cmd && *cmd)
+        return cmd;
+    cmd = getenv("PAGER");
+    if (cmd && *cmd && !pager_is_self_(cmd))
+        return cmd;
+    return NULL;
+}
+
+static bool
+pager_is_self_(const char *cmd)
+{
+    if (!cmd)
+        return false;
+    while (isspace((unsigned char)*cmd))
+        cmd++;
+    if (!*cmd)
+        return false;
+    size_t len = strcspn(cmd, " \t");
+    if (have_self_path_ && strncmp(cmd, self_path_, len) == 0 &&
+        self_path_[len] == '\0')
+        return true;
+    return (len == 4 && strncmp(cmd, "mess", 4) == 0);
+}
+
 
 static int
 build_command_from_env_(const char *env, const char *fallback, wordexp_t *we)
@@ -136,7 +172,7 @@ run_markdown_file_(const char *path)
     const char *renderer_env = getenv("MESS_MDRENDER");
     wordexp_t render_we;
     if (build_command_from_env_(renderer_env, default_markdown_renderer_(),
-            &render_we) != 0)
+                                &render_we) != 0)
         return -1;
     char **renderer_argv = calloc(render_we.we_wordc + 2, sizeof(char *));
     if (!renderer_argv) {
@@ -148,7 +184,10 @@ run_markdown_file_(const char *path)
     renderer_argv[render_we.we_wordc]     = (char *)path;
     renderer_argv[render_we.we_wordc + 1] = NULL;
 
-    const char *pager_env = getenv("PAGER");
+    for (size_t i = 0; i < render_we.we_wordc + 1; ++i)
+        printf("%s\n", renderer_argv[i]);
+
+    const char *pager_env = pager_command_env_();
     wordexp_t we;
     if (build_command_from_env_(pager_env, default_pager_(), &we) != 0) {
         free(renderer_argv);
@@ -223,20 +262,33 @@ run_markdown_file_(const char *path)
 static int
 run_pager_file_(const char *path)
 {
-    const char *pager_env = getenv("PAGER");
+    const char *pager_env = pager_command_env_();
     wordexp_t we;
     if (build_command_from_env_(pager_env, default_pager_(), &we) != 0)
         return -1;
-    char **argv = calloc(we.we_wordc + 2, sizeof(char *));
+    bool have_external = (pager_env && *pager_env);
+    char **argv = calloc(we.we_wordc + (have_external ? 2 : 1), sizeof(char *));
     if (!argv) {
         wordfree(&we);
         return -1;
     }
     for (size_t i = 0; i < we.we_wordc; ++i)
         argv[i] = we.we_wordv[i];
-    argv[we.we_wordc]     = (char *)path;
-    argv[we.we_wordc + 1] = NULL;
-    int rc                = run_simple_(argv);
+    int rc = 0;
+    if (have_external) {
+        argv[we.we_wordc]     = (char *)path;
+        argv[we.we_wordc + 1] = NULL;
+        rc                    = run_simple_(argv);
+    } else {
+        argv[we.we_wordc] = NULL;
+        int fd            = open(path, O_RDONLY);
+        if (fd == -1) {
+            perror(path);
+            rc = -1;
+        } else {
+            rc = run_simple_with_stdin_(argv, fd);
+        }
+    }
     free(argv);
     wordfree(&we);
     return rc;
@@ -302,6 +354,29 @@ run_simple_(char *const argv[])
         perror(argv[0]);
         _exit(127);
     }
+    return wait_for_child_(pid);
+}
+
+static int
+run_simple_with_stdin_(char *const argv[], int fd)
+{
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("fork");
+        close(fd);
+        return -1;
+    }
+    if (pid == 0) {
+        if (dup2(fd, STDIN_FILENO) == -1) {
+            perror("dup2 stdin");
+            _exit(1);
+        }
+        close(fd);
+        execvp(argv[0], argv);
+        perror(argv[0]);
+        _exit(127);
+    }
+    close(fd);
     return wait_for_child_(pid);
 }
 

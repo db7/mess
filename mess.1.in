@@ -1,5 +1,5 @@
 .\" Mess man page
-.TH MESS 1 "2024-10-09" "mess" "User Commands"
+.TH MESS 1 "__DATE__" "mess __VERSION__" "User Commands"
 .SH NAME
 mess \- wrap a pager and navigate OSC8 links
 .SH SYNOPSIS
@@ -59,7 +59,7 @@ Open
 without launching the interactive pager. Markdown inputs are rendered through
 .BR lowdown (1),
 .I file://
-URLs are normalised and reopened in
+URLs are normalized and reopened in
 .BR mess ,
 strings beginning with
 .I man://
@@ -153,7 +153,12 @@ unless a raw output flag is already present.
 .B MESSPAGER
 is consulted before
 .B PAGER
-so you can reserve a separate command for the wrapper.
+so you can reserve a separate command for the wrapper; when you export
+.B PAGER=mess
+system-wide, set
+.B MESSPAGER
+to your real pager (for example `less -R`) so the dispatcher knows what to run
+downstream.
 .TP
 .B BROWSER
 Command used when opening links or non Markdown targets. The value is

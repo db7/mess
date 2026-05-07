@@ -1,0 +1,4 @@
+#ifndef MESS_VERSION_H
+#define MESS_VERSION_H
+#define MESS_VERSION "__VERSION__"
+#endif
