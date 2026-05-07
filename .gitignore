@@ -5,3 +5,4 @@ compile_flags.txt
 mess
 mess.1
 version.h
+*_runner

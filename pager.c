@@ -1,4 +1,5 @@
 #include "nav.h"
+#include "offscr.h"
 #include "pager.h"
 #include "readq.h"
 
@@ -31,8 +32,8 @@ static bool set_raw_mode_(int fd, struct termios *out_prev);
 static void restore_terminal_(int fd, const struct termios *term);
 static void change_terminal_size_(int fd, int rows, int cols);
 static void get_terminal_size_(int fd, int *rows, int *cols);
-static bool handle_tty_input_(int child_fd, struct readq *tty_q, pid_t child);
-static bool handle_child_output_(struct readq *child_q);
+static bool handle_tty_pass_mode_(int child_fd, struct readq *tty_q, int tty_fd);
+static bool handle_child_output_(struct readq *child_q, bool *produced);
 static bool handle_upstream_input_(int child_fd, int upstream_fd, bool *done);
 static bool install_winch_(void);
 static void handle_sigint_(int sig);
@@ -40,14 +41,37 @@ static void handle_winch_signal_(int sig);
 static char *capture_stdin_to_temp_(void);
 static void cleanup_capture_path_(char *path);
 static bool append_arg_(char ***argvp, const char *arg);
-static void configure_snapshot_timeout_(void);
+static void configure_snapshot_timeouts_(void);
+static bool pager_enter_nav_mode_(int child_fd, int tty_fd);
+static void nav_notify_dirty_(void);
+static void drain_fd_(int fd);
+// Initial timeout (ms) to wait before capturing the first pager snapshot.
+static double snapshot_timeout_initial_ms_ = 2000.0;
+// Exponential decay factor applied to subsequent snapshot timeouts.
+static double snapshot_timeout_decay_      = 0.5;
+// Current timeout (ms) in effect for the next snapshot attempt.
+static double snapshot_timeout_current_ms_;
+// Tracks whether the previous iteration was still collecting snapshot data.
+static bool snapshot_collecting_prev_;
 
+// File descriptor used to propagate SIGWINCH notifications via a pipe.
 static int winch_fd_;
+// Saved terminal attributes so raw mode can be undone on exit.
 static struct termios saved_term_;
+// Flag indicating whether mess currently owns the terminal in raw mode.
 static bool term_in_raw_;
+// Counts SIGINT deliveries so we can escalate after repeated interrupts.
 static volatile sig_atomic_t sigint_count_;
+// PID of the forked pager child process, or -1 when inactive.
 static pid_t pager_child_pid_ = -1;
+static struct offscr_ctx *offscr_ctx_;
+static int nav_notify_pipe_[2] = {-1, -1};
+static struct nav_session *active_nav_session_;
+static volatile sig_atomic_t nav_exit_requested_;
 
+#define MESS_ENTER_HOTKEY '\t'
+
+// Parse the pager command from environment and split it into argv.
 static int
 build_pager_command_(char ***argv_out)
 {
@@ -85,6 +109,7 @@ build_pager_command_(char ***argv_out)
     return 0;
 }
 
+// Release the argv array built by build_pager_command_().
 static void
 free_pager_command_(char **argv)
 {
@@ -110,7 +135,7 @@ pager_run(int parse_flags)
         capture_path = capture_stdin_to_temp_();
 
     nav_reset();
-    configure_snapshot_timeout_();
+    configure_snapshot_timeouts_();
     if (parse_flags & PAGER_PARSE_MAN)
         nav_set_mode(NAV_MODE_MAN);
     else
@@ -137,19 +162,34 @@ pager_run(int parse_flags)
     cleanup_capture_path_(capture_path);
     return rc;
 }
+// Prime snapshot timeout values from environment overrides.
 static void
-configure_snapshot_timeout_(void)
+configure_snapshot_timeouts_(void)
 {
-    const char *env = getenv("MESS_SNAPSHOT_IDLE_MS");
-    if (!env || !*env)
-        return;
-    char *end = NULL;
-    long val  = strtol(env, &end, 10);
-    if (end == env)
-        return;
-    nav_set_snapshot_idle_timeout_ms(val);
+    const char *env = getenv("MESS_SNAPSHOT_TIMEOUT_MS");
+    if (env && *env) {
+        char *end = NULL;
+        double val = strtod(env, &end);
+        if (end != env && val > 0.0)
+            snapshot_timeout_initial_ms_ = val;
+    }
+
+    env = getenv("MESS_SNAPSHOT_TIMEOUT_DECAY");
+    if (env && *env) {
+        char *end = NULL;
+        double val = strtod(env, &end);
+        if (end != env && val > 0.0) {
+            if (val >= 1.0)
+                val = 0.99;
+            snapshot_timeout_decay_ = val;
+        }
+    }
+
+    snapshot_timeout_current_ms_ = 0.0;
+    snapshot_collecting_prev_    = false;
 }
 
+// Drive the pager with a pseudo-tty when mess runs interactively.
 static int
 pager_run_interactive_(char **pager_cmd, bool forward_stdin)
 {
@@ -204,6 +244,13 @@ pager_run_interactive_(char **pager_cmd, bool forward_stdin)
 #ifndef __linux__
         close(slave_fd);
 #endif
+        if (nav_notify_pipe_[0] != -1)
+            close(nav_notify_pipe_[0]);
+        if (nav_notify_pipe_[1] != -1)
+            close(nav_notify_pipe_[1]);
+        nav_notify_pipe_[0] = nav_notify_pipe_[1] = -1;
+        offscr_free(offscr_ctx_);
+        offscr_ctx_ = NULL;
         free_pager_command_(pager_cmd);
         return -1;
     }
@@ -214,6 +261,10 @@ pager_run_interactive_(char **pager_cmd, bool forward_stdin)
         if (slave_fd < 0)
             _exit(1);
 #endif
+        if (nav_notify_pipe_[0] != -1)
+            close(nav_notify_pipe_[0]);
+        if (nav_notify_pipe_[1] != -1)
+            close(nav_notify_pipe_[1]);
         if (setsid() == -1)
             _exit(1);
         if (ioctl(slave_fd, TIOCSCTTY, 0) == -1)
@@ -234,6 +285,35 @@ pager_run_interactive_(char **pager_cmd, bool forward_stdin)
 
     nav_set_status_fd(tty_fd);
     nav_set_input_fd(tty_fd);
+    offscr_ctx_ = offscr_new(NULL);
+    if (offscr_ctx_ == NULL) {
+        perror("offscr_new");
+        restore_terminal_(tty_fd, &saved_term_);
+        close(tty_fd);
+        close(master_fd);
+#ifndef __linux__
+        close(slave_fd);
+#endif
+        free_pager_command_(pager_cmd);
+        return -1;
+    }
+    if (pipe(nav_notify_pipe_) == -1) {
+        perror("pipe");
+        offscr_free(offscr_ctx_);
+        offscr_ctx_ = NULL;
+        restore_terminal_(tty_fd, &saved_term_);
+        close(tty_fd);
+        close(master_fd);
+#ifndef __linux__
+        close(slave_fd);
+#endif
+        free_pager_command_(pager_cmd);
+        return -1;
+    }
+    fcntl(nav_notify_pipe_[0], F_SETFL,
+          fcntl(nav_notify_pipe_[0], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(nav_notify_pipe_[1], F_SETFL,
+          fcntl(nav_notify_pipe_[1], F_GETFL, 0) | O_NONBLOCK);
 
     struct readq child_q;
     struct readq tty_q;
@@ -256,14 +336,28 @@ pager_run_interactive_(char **pager_cmd, bool forward_stdin)
         if (rv == pid)
             break;
 
+        bool collecting = nav_snapshot_collecting();
+        if (collecting && !snapshot_collecting_prev_) {
+            snapshot_timeout_current_ms_ = snapshot_timeout_initial_ms_;
+            snapshot_collecting_prev_    = true;
+        } else if (!collecting) {
+            snapshot_timeout_current_ms_ = 0.0;
+            snapshot_collecting_prev_    = false;
+        }
+
         struct timeval timeout;
         struct timeval *timeout_ptr = NULL;
-        if (nav_snapshot_collecting()) {
-            if (nav_snapshot_timeout(&timeout)) {
-                timeout_ptr = &timeout;
-            } else if (!nav_snapshot_collecting() && nav_snapshot_ready()) {
-                nav_emit_snapshot();
-            }
+        if (collecting && snapshot_timeout_current_ms_ > 0.0) {
+            double ms = snapshot_timeout_current_ms_;
+            if (ms < 1.0)
+                ms = 1.0;
+            timeout.tv_sec  = (time_t)(ms / 1000.0);
+            double rem_ms   = ms - ((double)timeout.tv_sec * 1000.0);
+            long usec       = (long)(rem_ms * 1000.0);
+            if (timeout.tv_sec == 0 && usec <= 0)
+                usec = 1;
+            timeout.tv_usec = (suseconds_t)usec;
+            timeout_ptr     = &timeout;
         }
 
         FD_ZERO(&readfds);
@@ -280,23 +374,34 @@ pager_run_interactive_(char **pager_cmd, bool forward_stdin)
             break;
         }
         if (sel == 0) {
-            if (nav_snapshot_finish() && nav_snapshot_ready())
-                nav_emit_snapshot();
+            if (nav_snapshot_collecting()) {
+                if (nav_snapshot_finish() && nav_snapshot_ready())
+                    nav_emit_snapshot();
+            }
+            snapshot_timeout_current_ms_ = 0.0;
+            snapshot_collecting_prev_    = false;
             continue;
         }
 
         if (FD_ISSET(tty_fd, &readfds)) {
-            if (!handle_tty_input_(master_fd, &tty_q, pid)) {
+            if (!handle_tty_pass_mode_(master_fd, &tty_q, tty_fd)) {
                 err = 1;
                 break;
             }
         }
 
+        bool child_produced = false;
         if (FD_ISSET(master_fd, &readfds)) {
-            if (!handle_child_output_(&child_q)) {
+            if (!handle_child_output_(&child_q, &child_produced)) {
                 err = 1;
                 break;
             }
+        }
+
+        if (child_produced && nav_snapshot_collecting()) {
+            snapshot_timeout_current_ms_ *= snapshot_timeout_decay_;
+            if (snapshot_timeout_current_ms_ < 1.0)
+                snapshot_timeout_current_ms_ = 1.0;
         }
 
         if (upstream_fd != -1 && !upstream_done &&
@@ -323,9 +428,21 @@ pager_run_interactive_(char **pager_cmd, bool forward_stdin)
         restore_terminal_(tty_fd, &saved_term_);
     close(tty_fd);
     close(master_fd);
+    if (active_nav_session_ != NULL) {
+        nav_session_end(active_nav_session_);
+        active_nav_session_ = NULL;
+    }
+    if (nav_notify_pipe_[0] != -1)
+        close(nav_notify_pipe_[0]);
+    if (nav_notify_pipe_[1] != -1)
+        close(nav_notify_pipe_[1]);
+    nav_notify_pipe_[0] = nav_notify_pipe_[1] = -1;
+    offscr_free(offscr_ctx_);
+    offscr_ctx_ = NULL;
     return err ? -1 : 0;
 }
 
+// Execute the pager when mess is fed through a pipeline.
 static int
 pager_run_piped_(char **pager_cmd)
 {
@@ -350,6 +467,7 @@ pager_run_piped_(char **pager_cmd)
     return -1;
 }
 
+// Switch the tty to raw mode while remembering the previous settings.
 static bool
 set_raw_mode_(int fd, struct termios *out_prev)
 {
@@ -367,6 +485,7 @@ set_raw_mode_(int fd, struct termios *out_prev)
     return tcsetattr(fd, TCSANOW, &term) != -1;
 }
 
+// Restore canonical terminal settings once raw mode is no longer needed.
 static void
 restore_terminal_(int fd, const struct termios *term)
 {
@@ -375,6 +494,7 @@ restore_terminal_(int fd, const struct termios *term)
     term_in_raw_ = false;
 }
 
+// Force the child pseudo-tty to adopt the provided dimensions.
 static void
 change_terminal_size_(int fd, int rows, int cols)
 {
@@ -386,6 +506,7 @@ change_terminal_size_(int fd, int rows, int cols)
     ioctl(fd, TIOCSWINSZ, &ws);
 }
 
+// Query the current terminal size, falling back to 80x24 when unknown.
 static void
 get_terminal_size_(int fd, int *rows, int *cols)
 {
@@ -399,6 +520,7 @@ get_terminal_size_(int fd, int *rows, int *cols)
     *cols = ws.ws_col;
 }
 
+// Install a SIGWINCH handler that resizes the child PTY.
 static bool
 install_winch_(void)
 {
@@ -408,6 +530,7 @@ install_winch_(void)
     return sigaction(SIGWINCH, &sa, NULL) != -1;
 }
 
+// Count SIGINT deliveries so a second interrupt terminates immediately.
 static void
 handle_sigint_(int sig)
 {
@@ -415,8 +538,11 @@ handle_sigint_(int sig)
     sigint_count_++;
     if (sigint_count_ >= 2)
         exit(1);
+    nav_exit_requested_ = 1;
+    nav_notify_dirty_();
 }
 
+// React to SIGWINCH by relaying the new terminal size downstream.
 static void
 handle_winch_signal_(int sig)
 {
@@ -428,71 +554,55 @@ handle_winch_signal_(int sig)
         change_terminal_size_(winch_fd_, rows, cols);
     if (pager_child_pid_ > 0)
         (void)kill(pager_child_pid_, SIGWINCH);
+    nav_exit_requested_ = 1;
+    nav_notify_dirty_();
 }
 
+// Process keyboard input from the controlling terminal.
 static bool
-handle_tty_input_(int child_fd, struct readq *tty_queue, pid_t child_pid)
+handle_tty_pass_mode_(int child_fd, struct readq *tty_queue, int tty_fd)
 {
     if (!readq_refill(tty_queue))
         return true;
 
-    size_t available = readq_available_bytes(tty_queue);
-    if (available == 0)
-        return true;
-
-    char *buf           = tty_queue->buffer + tty_queue->start;
-    ssize_t forward_len = (ssize_t)available;
-    bool forward =
-        nav_process_input(buf, &forward_len, sizeof(tty_queue->buffer));
-
-    // When navigation requests a redraw the pager simulates Ctrl-L by
-    // delivering a SIGWINCH to the child and writing form-feed so we capture
-    // a fresh frame for highlighting.
-    if (nav_consume_refresh_request()) {
-        if (kill(child_pid, SIGWINCH) == -1 && errno != ESRCH) {
-            perror("kill SIGWINCH");
-            return false;
+    while (tty_queue->start < tty_queue->end) {
+        char ch = tty_queue->buffer[tty_queue->start++];
+        if (ch == MESS_ENTER_HOTKEY) {
+            tty_queue->start = tty_queue->end = 0;
+            if (!pager_enter_nav_mode_(child_fd, tty_fd))
+                return false;
+            return true;
         }
-        const char refresh = '\f';
-        if (write(child_fd, &refresh, 1) == -1) {
-            perror("write refresh");
-            return false;
-        }
-    }
-
-    if (forward && forward_len > 0) {
-        if (write(child_fd, buf, (size_t)forward_len) == -1) {
+        if (write(child_fd, &ch, 1) == -1) {
             perror("write to child");
             return false;
         }
     }
 
-    tty_queue->start = 0;
-    tty_queue->end   = 0;
+    tty_queue->start = tty_queue->end = 0;
     return true;
 }
 
+// Consume bytes produced by the child process and push them through nav.
 static bool
-handle_child_output_(struct readq *bq)
+handle_child_output_(struct readq *bq, bool *produced)
 {
+    if (produced)
+        *produced = false;
     if (!readq_refill(bq))
         return true;
 
     ssize_t nread = nav_process_output(bq);
     if (nread > 0) {
+        if (produced)
+            *produced = true;
         bool freeze_output = nav_mode_active() && nav_freeze_enabled();
         if (freeze_output) {
-            // In frozen navigation mode we buffer a single snapshot. Once it
-            // arrives we replay the highlighted frame ourselves and ignore any
-            // subsequent child output until navigation exits.
-            if (nav_snapshot_collecting()) {
-                // Accumulate the redraw frame until either the producer pauses
-                // (short read) or the snapshot timer fires.
+            // Buffer the redraw frame while navigation is frozen; a later
+            // timeout will flush the snapshot to the terminal.
+            if (nav_snapshot_collecting())
                 nav_append_snapshot(bq->buffer, (size_t)nread);
-                if (readq_last_len(bq) < READQ_SIZE - 1)
-                    nav_snapshot_finish();
-            }
-            if (nav_snapshot_ready())
+            if (!nav_snapshot_collecting() && nav_snapshot_ready())
                 nav_emit_snapshot();
             nav_set_output_dirty(nav_snapshot_collecting());
         } else {
@@ -513,6 +623,7 @@ handle_child_output_(struct readq *bq)
     return true;
 }
 
+// Forward data from the upstream fd into the child PTY, tracking EOF.
 static bool
 handle_upstream_input_(int child_fd, int upstream_fd, bool *done)
 {
@@ -548,6 +659,93 @@ handle_upstream_input_(int child_fd, int upstream_fd, bool *done)
     return false;
 }
 
+static void
+drain_fd_(int fd)
+{
+    if (fd < 0)
+        return;
+    char buf[64];
+    while (read(fd, buf, sizeof(buf)) > 0)
+        ;
+}
+
+static void
+nav_notify_dirty_(void)
+{
+    if (active_nav_session_ == NULL)
+        return;
+    if (nav_notify_pipe_[1] < 0)
+        return;
+    char c = 'x';
+    ssize_t rc = write(nav_notify_pipe_[1], &c, 1);
+    (void)rc;
+}
+
+static bool
+pager_enter_nav_mode_(int child_fd, int tty_fd)
+{
+    if (offscr_ctx_ == NULL)
+        return false;
+
+    const char ctrl_l = '\f';
+    if (write(child_fd, &ctrl_l, 1) == -1) {
+        perror("write Ctrl-L");
+        return false;
+    }
+
+    int cap_rc = offscr_capture(offscr_ctx_, child_fd);
+    if (cap_rc < 0) {
+        perror("offscr_capture");
+        return false;
+    }
+
+    struct nav_session_args args = {
+        .tty_fd = tty_fd,
+        .notify_fd = nav_notify_pipe_[0],
+        .out_fd = STDOUT_FILENO,
+        .timeout_ms = 250,
+        .exit_key = '\x1b',
+    };
+
+    drain_fd_(nav_notify_pipe_[0]);
+    active_nav_session_ = nav_session_begin(&args);
+    if (active_nav_session_ == NULL)
+        return false;
+
+    bool running = true;
+    nav_exit_requested_ = 0;
+    while (running) {
+        nav_event_t ev = nav_session_run(active_nav_session_);
+        switch (ev) {
+        case NAV_EVENT_EXIT:
+            running = false;
+            break;
+        case NAV_EVENT_DIRTY:
+            if (offscr_capture(offscr_ctx_, child_fd) < 0)
+                running = false;
+            break;
+        case NAV_EVENT_TIMEOUT:
+            break;
+        case NAV_EVENT_ERROR:
+        default:
+            running = false;
+            break;
+        }
+        if (nav_exit_requested_) {
+            nav_exit_requested_ = 0;
+            running = false;
+        }
+    }
+
+    nav_session_end(active_nav_session_);
+    active_nav_session_ = NULL;
+    drain_fd_(nav_notify_pipe_[0]);
+    nav_exit_requested_ = 0;
+    sigint_count_ = 0;
+    return true;
+}
+
+// Persist stdin to a temporary file so the pager can re-open it later.
 static char *
 capture_stdin_to_temp_(void)
 {
@@ -585,6 +783,7 @@ fail:
     return NULL;
 }
 
+// Remove and free a temporary capture path created by capture_stdin_to_temp_().
 static void
 cleanup_capture_path_(char *path)
 {
@@ -594,6 +793,7 @@ cleanup_capture_path_(char *path)
     free(path);
 }
 
+// Append a string to a NULL-terminated argv array.
 static bool
 append_arg_(char ***argvp, const char *arg)
 {

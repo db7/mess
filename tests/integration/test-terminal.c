@@ -28,8 +28,10 @@ struct termios_record {
     struct termios term;
 };
 
+// Capture writes performed by the pager's termios hook during tests.
 static int hook_fd_ = -1;
 
+// Record terminal attributes emitted during pager execution.
 static void
 termios_hook_(const struct termios *term, char stage)
 {
@@ -47,6 +49,7 @@ termios_hook_(const struct termios *term, char stage)
     }
 }
 
+// Drain any remaining bytes from the PTY to avoid blocking.
 static void
 drain_output_(int fd)
 {
@@ -61,6 +64,7 @@ drain_output_(int fd)
     }
 }
 
+// Wait for the pager child to exit while streaming output to the drain.
 static void
 wait_for_exit_(pid_t pid, int master_fd, int *status_out)
 {
@@ -81,6 +85,7 @@ wait_for_exit_(pid_t pid, int master_fd, int *status_out)
 
 typedef void (*input_fn)(pid_t child_pid, int master_fd);
 
+// Send a quit command to the pager after a short delay.
 static void
 send_quit_(pid_t child_pid, int master_fd)
 {
@@ -93,6 +98,7 @@ send_quit_(pid_t child_pid, int master_fd)
     }
 }
 
+// Simulate Ctrl-C followed by quit to test signal handling.
 static void
 send_ctrl_c_then_quit_(pid_t child_pid, int master_fd)
 {
@@ -109,6 +115,7 @@ send_ctrl_c_then_quit_(pid_t child_pid, int master_fd)
     }
 }
 
+// Deliver two Ctrl-C signals to force the pager to abort.
 static void
 send_double_ctrl_c_(pid_t child_pid, int master_fd)
 {
@@ -126,6 +133,7 @@ send_double_ctrl_c_(pid_t child_pid, int master_fd)
     }
 }
 
+// Close a file descriptor helper that resets the stored handle.
 static void
 close_fd_(int *fd)
 {
@@ -135,6 +143,7 @@ close_fd_(int *fd)
     }
 }
 
+// Execute a single integration test scenario against the pager.
 static void
 run_case_(const char *label, input_fn fn, int expected_exit)
 {

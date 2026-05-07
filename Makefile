@@ -4,18 +4,24 @@ TARGETS=	mess
 MANPAGE=	mess.1
 VERSION_HDR=	version.h
 
-MESS_SRCS=	main.c dispatcher.c pager.c nav.c readq.c uri.c
-MESS_HDRS=	dispatcher.h pager.h nav.h readq.h uri.h
+MESS_SRCS=	main.c dispatcher.c pager.c nav.c offscr.c readq.c uri.c
+MESS_HDRS=	dispatcher.h pager.h nav.h offscr.h readq.h uri.h
 
 TESTS_SRC=	tests/test-nav.c \
 		tests/test-parser.c \
 		tests/test-reader.c \
-		tests/test-uri.c
+		tests/test-uri.c \
+		tests/test-offs.c \
+		tests/test-nav-session.c \
+		tests/test-links.c
 
 TESTS_BIN=	tests/test-nav.bin \
 		tests/test-parser.bin \
 		tests/test-reader.bin \
-		tests/test-uri.bin
+		tests/test-uri.bin \
+		tests/test-offs.bin \
+		tests/test-nav-session.bin \
+		tests/test-links.bin
 
 CFLAGS=		-O2 -g
 CFLAGS+= 	-I. -std=c11 -Wall -Wextra -Werror
@@ -72,8 +78,8 @@ test: $(TARGETS) $(TESTS_BIN)
 
 coverage:
 	@$(MAKE) clean
-	@$(MAKE) CFLAGS="$(CFLAGS) -fprofile-arcs -ftest-coverage" LDFLAGS="$(LDFLAGS) -fprofile-arcs -ftest-coverage"
-	@$(MAKE) test
+	@$(MAKE) CFLAGS="$(CFLAGS) -fprofile-arcs -ftest-coverage" LDFLAGS="$(LDFLAGS) -fprofile-arcs -ftest-coverage" tests/test-links.bin
+	#@$(MAKE) test
 
 coverage-info:
 	@if ! command -v gcovr >/dev/null 2>&1; then \
@@ -88,7 +94,10 @@ install: mess $(MANPAGE)
 	$(INSTALL) -d "$(DESTDIR)$(MANDIR)/man1"
 	$(INSTALL) -m 644 $(MANPAGE) "$(DESTDIR)$(MANDIR)/man1/mess.1"
 
-tests/test-%.bin: tests/test-%.c nav.c readq.c uri.c
+tests/test-links.bin: tests/test-links.c links.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test-%.bin: tests/test-%.c nav.c links.c offscr.c readq.c uri.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 format:

@@ -34,7 +34,10 @@ static const char *pager_command_env_(void);
 static bool pager_is_self_(const char *cmd);
 static void ensure_manpager_(void);
 static char *shell_quote_(const char *text);
+
+// Absolute path to the running mess binary when known.
 static char self_path_[PATH_MAX];
+// Flag noting whether self_path_ currently contains a valid path.
 static bool have_self_path_;
 
 int
@@ -83,6 +86,7 @@ dispatcher_set_self_path(const char *path)
     have_self_path_ = true;
 }
 
+// Export the MESSFILE environment variable so child processes know the source.
 static int
 set_messfile_env_(const char *path)
 {
@@ -93,6 +97,7 @@ set_messfile_env_(const char *path)
     return 0;
 }
 
+// Derive the pager command when none is specified in the environment.
 static const char *
 default_pager_(void)
 {
@@ -109,6 +114,7 @@ default_pager_(void)
     return "mess -m -o";
 }
 
+// Pick a browser launcher suitable for the current platform.
 static const char *
 default_browser_(void)
 {
@@ -119,12 +125,14 @@ default_browser_(void)
 #endif
 }
 
+// Provide a default Markdown renderer when the user has not configured one.
 static const char *
 default_markdown_renderer_(void)
 {
     return "lowdown -tterm --term-no-links";
 }
 
+// Look up the pager command from environment variables, falling back as needed.
 static const char *
 pager_command_env_(void)
 {
@@ -137,6 +145,7 @@ pager_command_env_(void)
     return NULL;
 }
 
+// Test whether the configured pager command resolves back to mess itself.
 static bool
 pager_is_self_(const char *cmd)
 {
@@ -154,6 +163,7 @@ pager_is_self_(const char *cmd)
 }
 
 
+// Tokenise the command string originating from the environment.
 static int
 build_command_from_env_(const char *env, const char *fallback, wordexp_t *we)
 {
@@ -166,6 +176,7 @@ build_command_from_env_(const char *env, const char *fallback, wordexp_t *we)
     return rc;
 }
 
+// Run a Markdown renderer and pipe its output into the configured pager.
 static int
 run_markdown_file_(const char *path)
 {
@@ -259,6 +270,7 @@ run_markdown_file_(const char *path)
     return (rc1 == 0) ? rc2 : rc1;
 }
 
+// Invoke the pager on a regular file target.
 static int
 run_pager_file_(const char *path)
 {
@@ -294,6 +306,7 @@ run_pager_file_(const char *path)
     return rc;
 }
 
+// Launch the system man(1) command with a local file path.
 static int
 run_man_file_(const char *path)
 {
@@ -309,6 +322,7 @@ run_man_file_(const char *path)
     return run_simple_(argv);
 }
 
+// Launch the system man(1) command with a topic and section.
 static int
 run_man_topic_(const char *name, const char *section)
 {
@@ -319,6 +333,7 @@ run_man_topic_(const char *name, const char *section)
     return run_simple_(argv);
 }
 
+// Spawn the configured browser to open an external link.
 static int
 run_browser_(const char *link)
 {
@@ -341,6 +356,7 @@ run_browser_(const char *link)
     return rc;
 }
 
+// Fork/exec the provided argv and propagate the exit status.
 static int
 run_simple_(char *const argv[])
 {
@@ -357,6 +373,7 @@ run_simple_(char *const argv[])
     return wait_for_child_(pid);
 }
 
+// Fork/exec the provided argv while wiring a file descriptor to stdin.
 static int
 run_simple_with_stdin_(char *const argv[], int fd)
 {
@@ -380,6 +397,7 @@ run_simple_with_stdin_(char *const argv[], int fd)
     return wait_for_child_(pid);
 }
 
+// Wait for a child process and normalise its termination status.
 static int
 wait_for_child_(pid_t pid)
 {
@@ -395,6 +413,7 @@ wait_for_child_(pid_t pid)
     return -1;
 }
 
+// Ensure MANPAGER references mess itself when available.
 static void
 ensure_manpager_(void)
 {
@@ -415,6 +434,7 @@ ensure_manpager_(void)
         perror("setenv MANPAGER");
 }
 
+// Produce a safely shell-quoted version of the supplied text.
 static char *
 shell_quote_(const char *text)
 {

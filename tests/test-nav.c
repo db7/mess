@@ -10,11 +10,16 @@
 #include <string.h>
 #include <unistd.h>
 
+// Count how many times the fake link launcher was invoked.
 static int launch_count_;
+// Store the most recent URL handed to the fake launcher.
 static char last_launched_[256];
+// Count how many times the fake editor callback was invoked.
 static int editor_count_;
+// Keep the last editor path provided during tests.
 static char last_editor_path_[256];
 
+// Detect whether the highlighted rendering includes the expected text.
 static bool
 highlight_contains_text_(const char *rendered, const char *text)
 {
@@ -24,16 +29,19 @@ highlight_contains_text_(const char *rendered, const char *text)
     return strstr(rendered, needle) != NULL;
 }
 
+// OSC8 payload containing duplicate and unique links.
 static const char DUPLICATE_LINKS_SAMPLE_[] =
     "\x1b]8;;https://dup.example\x1b\\One\x1b]8;;\x1b\\ "
     "\x1b]8;;https://dup.example\x1b\\Two\x1b]8;;\x1b\\ "
     "\x1b]8;;https://unique.example\x1b\\Unique\x1b]8;;\x1b\\";
 
+// OSC8 payload where all entries share the same URL.
 static const char SINGLE_LINK_SAMPLE_[] =
     "\x1b]8;;https://only.example\x1b\\One\x1b]8;;\x1b\\ "
     "\x1b]8;;https://only.example\x1b\\Two\x1b]8;;\x1b\\ "
     "\x1b]8;;https://only.example\x1b\\Three\x1b]8;;\x1b\\";
 
+// OSC8 payload designed to exercise grouped navigation cycling.
 static const char CYCLE_SCENARIO_SAMPLE_[] =
     "\x1b]8;;https://l1.example\x1b\\L1 first\x1b]8;;\x1b\\ "
     "\x1b]8;;https://l2.example\x1b\\L2 first\x1b]8;;\x1b\\ "
@@ -43,9 +51,15 @@ static const char CYCLE_SCENARIO_SAMPLE_[] =
     "\x1b]8;;https://l1.example\x1b\\L1 second\x1b]8;;\x1b\\ "
     "\x1b]8;;https://l4.example\x1b\\L4\x1b]8;;\x1b\\";
 
+// Man-like output with colour sequences for link text.
 static const char MAN_COLORED_SAMPLE_[] =
     "See \x1b[1;94mwordexp(3)\x1b[0m for details.\n";
 
+// OSC8 sample containing colour codes inside the link text.
+static const char OSC_COLORED_SAMPLE_[] =
+    "\x1b]8;;https://color.example\x1b\\\x1b[1;93mfirst\x1b[0m\x1b]8;;\x1b\\ ";
+
+// Fake launcher callback used to capture activations.
 static int
 fake_launcher_(const char *link, const char *text)
 {
@@ -60,6 +74,7 @@ fake_launcher_(const char *link, const char *text)
     return 0;
 }
 
+// Fake editor callback used to capture editor invocations.
 static int
 fake_editor_(const char *path)
 {
@@ -73,6 +88,7 @@ fake_editor_(const char *path)
     return 0;
 }
 
+// Seed the navigation buffer with a two-link OSC8 sample.
 static void
 prepare_links_(void)
 {
@@ -87,6 +103,7 @@ prepare_links_(void)
     nav_process_output(&queue);
 }
 
+// Populate navigation state with duplicate/unique link groups.
 static void
 prepare_duplicate_links_(void)
 {
@@ -101,6 +118,7 @@ prepare_duplicate_links_(void)
     nav_process_output(&queue);
 }
 
+// Load a buffer containing repeated single-link entries.
 static void
 prepare_single_link_list_(void)
 {
@@ -115,6 +133,7 @@ prepare_single_link_list_(void)
     nav_process_output(&queue);
 }
 
+// Populate navigation state with a scenario exercising wraparound.
 static void
 prepare_cycle_scenario_(void)
 {
@@ -129,6 +148,7 @@ prepare_cycle_scenario_(void)
     nav_process_output(&queue);
 }
 
+// Prepare a colored man page snippet for highlighting tests.
 static void
 prepare_colored_man_sample_(void)
 {
@@ -143,6 +163,22 @@ prepare_colored_man_sample_(void)
     nav_process_output(&queue);
 }
 
+// Prepare a colored OSC8 snippet for highlighting tests.
+static void
+prepare_colored_osc_sample_(void)
+{
+    struct readq queue;
+    readq_init(&queue, -1);
+    size_t len = strlen(OSC_COLORED_SAMPLE_);
+    assert(len < READQ_SIZE);
+    memcpy(queue.buffer, OSC_COLORED_SAMPLE_, len);
+    queue.start = 0;
+    queue.end   = len;
+    queue.buffer[len] = '\0';
+    nav_process_output(&queue);
+}
+
+// Feed a single keypress through nav_process_input for convenience.
 static bool
 nav_hit_(char ch)
 {
@@ -156,6 +192,7 @@ nav_hit_(char ch)
     return forward;
 }
 
+// Render highlighted output for assertions using the provided sample.
 static void
 render_highlighted_sample_(const char *sample, char *out, size_t cap)
 {
@@ -167,6 +204,7 @@ render_highlighted_sample_(const char *sample, char *out, size_t cap)
     out[written] = '\0';
 }
 
+// Verify that Tab cycles through multiple links and wraps around.
 static void
 test_tab_cycles_links_(void)
 {
@@ -190,6 +228,7 @@ test_tab_cycles_links_(void)
     assert(nav_selected_index() == 0);
 }
 
+// Ensure Shift-Tab handles escape sequences arriving in pieces.
 static void
 test_shift_tab_handles_split_sequence_(void)
 {
@@ -220,6 +259,7 @@ test_shift_tab_handles_split_sequence_(void)
     nav_set_input_fd(-1);
 }
 
+// Confirm Enter triggers the active launcher and resets selection.
 static void
 test_enter_triggers_launcher_(void)
 {
@@ -241,6 +281,7 @@ test_enter_triggers_launcher_(void)
     assert(nav_selected_index() == -1);
 }
 
+// Make sure regular keys bypass navigation when inactive.
 static void
 test_regular_keys_pass_through_(void)
 {
@@ -255,6 +296,7 @@ test_regular_keys_pass_through_(void)
     assert(nav_selected_index() == -1);
 }
 
+// Check that Tab enters navigation mode even without stored links.
 static void
 test_tab_enters_mode_without_links_(void)
 {
@@ -279,6 +321,7 @@ test_tab_enters_mode_without_links_(void)
     assert(forwarded);
 }
 
+// Ensure unmapped keys during navigation preserve the current selection.
 static void
 test_regular_keys_keep_selection_(void)
 {
@@ -299,6 +342,7 @@ test_regular_keys_keep_selection_(void)
     assert(!nav_status_visible());
 }
 
+// Verify 's' toggles the status overlay without leaving navigation mode.
 static void
 test_status_toggle_with_s_(void)
 {
@@ -325,6 +369,7 @@ test_status_toggle_with_s_(void)
     assert(!nav_status_visible());
 }
 
+// Ensure cycling skips over duplicate URL groups.
 static void
 test_cycle_skips_duplicate_links_(void)
 {
@@ -354,6 +399,7 @@ test_cycle_skips_duplicate_links_(void)
     assert(strcmp(second, third) != 0);
 }
 
+// Confirm cycling works when all items share the same link.
 static void
 test_cycle_handles_single_link_(void)
 {
@@ -379,6 +425,7 @@ test_cycle_handles_single_link_(void)
         assert(first == second);
 }
 
+// Check that contiguous duplicates highlight together.
 static void
 test_highlight_contiguous_duplicates_(void)
 {
@@ -395,6 +442,7 @@ test_highlight_contiguous_duplicates_(void)
     assert(strstr(rendered, "\x1b[7mUnique\x1b[27m") == NULL);
 }
 
+// Validate group-based navigation order and highlighting.
 static void
 test_cycle_groups_sequence_(void)
 {
@@ -446,6 +494,7 @@ test_cycle_groups_sequence_(void)
     assert(highlight_contains_text_(rendered, "L1 first"));
 }
 
+// Verify coloured man-page tokens still produce clean links.
 static void
 test_man_colored_token_stripping_(void)
 {
@@ -470,6 +519,26 @@ test_man_colored_token_stripping_(void)
     assert(strstr(rendered, "\x1b[1;94m\x1b[7mwordexp(3)\x1b[27m\x1b[0m") != NULL);
 }
 
+// Verify highlighted OSC8 text preserves colour sequences.
+static void
+test_osc_colored_highlight_(void)
+{
+    nav_reset();
+    nav_set_mode(NAV_MODE_OSC8);
+    nav_set_launcher(fake_launcher_);
+    nav_set_document_path(NULL);
+    prepare_colored_osc_sample_();
+
+    assert(nav_link_count() == 1);
+    (void)nav_hit_('\t');
+    assert(nav_selected_index() == 0);
+
+    char rendered[256];
+    render_highlighted_sample_(OSC_COLORED_SAMPLE_, rendered, sizeof(rendered));
+    assert(strstr(rendered, "\x1b[7m\x1b[1;93m\x1b[7mfirst\x1b[0m\x1b[27m") != NULL);
+}
+
+// Ensure Escape leaves navigation mode without invoking launchers.
 static void
 test_escape_exits_selection_(void)
 {
@@ -488,6 +557,7 @@ test_escape_exits_selection_(void)
     assert(nav_selected_index() == -1);
 }
 
+// Confirm 'v' opens the editor when a document path is configured.
 static void
 test_v_opens_editor_when_document_set_(void)
 {
@@ -505,6 +575,7 @@ test_v_opens_editor_when_document_set_(void)
     nav_set_document_path(NULL);
 }
 
+// Ensure 'v' falls through when no document path exists.
 static void
 test_v_passes_through_without_document_(void)
 {
@@ -519,6 +590,7 @@ test_v_passes_through_without_document_(void)
     assert(editor_count_ == 0);
 }
 
+// Verify 'v' exits selection mode after launching the editor.
 static void
 test_v_exits_selection_(void)
 {
@@ -541,6 +613,7 @@ test_v_exits_selection_(void)
     nav_set_document_path(NULL);
 }
 
+// Ensure 'v' cancels selection even when no editor runs.
 static void
 test_v_exits_selection_without_document_(void)
 {
@@ -575,6 +648,7 @@ main(void)
     test_highlight_contiguous_duplicates_();
     test_cycle_groups_sequence_();
     test_man_colored_token_stripping_();
+    test_osc_colored_highlight_();
     test_escape_exits_selection_();
     test_v_opens_editor_when_document_set_();
     test_v_passes_through_without_document_();

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+// Print usage instructions for the CLI entry point.
 static void
 usage_(const char *prog)
 {
@@ -26,6 +27,7 @@ main(int argc, char *argv[])
     bool enable_man      = false;
     const char *open_arg = NULL;
 
+    // Supported long-form command-line options for getopt_long().
     static const struct option long_opts[] = {
         {"help", no_argument, NULL, 'h'},
         {"version", no_argument, NULL, 'V'},

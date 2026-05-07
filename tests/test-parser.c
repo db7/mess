@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+// README excerpt used to validate manual reference detection.
 static const char README_HEAD_SAMPLE_[] =
     "mess -- more or less with links\n"
     "===============================\n"
@@ -19,6 +20,7 @@ static const char README_HEAD_SAMPLE_[] =
     "output of `man -P cat`), `mess` scans the rendered text for references\n"
     "such as `printf(3)` or `socket(2)` and exposes them as navigation targets.\n";
 
+// Populate the read queue with simulated terminal output.
 static void
 feed_(struct readq *queue, const char *data)
 {
@@ -33,6 +35,7 @@ feed_(struct readq *queue, const char *data)
     queue->buffer[queue->end] = '\0';
 }
 
+// Ensure a single OSC8 block produces a stored link.
 static void
 test_parses_simple_sequence_(void)
 {
@@ -48,6 +51,7 @@ test_parses_simple_sequence_(void)
     assert(strcmp(nav_text_at(0), "Example") == 0);
 }
 
+// Confirm parsing continues across split OSC8 sequences.
 static void
 test_parsing_survives_split_sequences_(void)
 {
@@ -66,6 +70,7 @@ test_parsing_survives_split_sequences_(void)
     assert(strcmp(nav_text_at(0), "Split Link") == 0);
 }
 
+// Verify malformed sequences do not allocate navigation entries.
 static void
 test_malformed_sequence_does_not_allocate_(void)
 {
@@ -79,6 +84,7 @@ test_malformed_sequence_does_not_allocate_(void)
     assert(nav_link_count() == 0);
 }
 
+// Check that backspace-heavy man output still yields usable links.
 static void
 test_man_parser_handles_backspaces_(void)
 {
@@ -100,6 +106,7 @@ test_man_parser_handles_backspaces_(void)
     nav_set_mode(NAV_MODE_OSC8);
 }
 
+// Validate ring buffer eviction when more than MAX_URLS links appear.
 static void
 test_ring_buffer_replaces_oldest_(void)
 {
@@ -122,6 +129,7 @@ test_ring_buffer_replaces_oldest_(void)
     assert(strcmp(nav_link_at(MAX_URLS - 1), "https://ring.test/12") == 0);
 }
 
+// Exercise the man parser against README prose containing references.
 static void
 test_readme_head_parses_man_links_(void)
 {

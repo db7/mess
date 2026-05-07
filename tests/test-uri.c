@@ -8,6 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 
+// Validate markdown extension detection across case variants.
 static void
 test_markdown_detection(void)
 {
@@ -27,6 +28,7 @@ test_manpage_detection(void)
     assert(!uri_is_manpage_path("noext"));
 }
 
+// Confirm HTTP/HTTPS URLs are identified while others are rejected.
 static void
 test_http_detection(void)
 {
@@ -36,6 +38,7 @@ test_http_detection(void)
     assert(!uri_is_http_url("file:///tmp/foo"));
 }
 
+// Exercise parsing of the custom man:// scheme.
 static void
 test_man_uri_detection(void)
 {
@@ -50,6 +53,7 @@ test_man_uri_detection(void)
     assert(!uri_parse_man_uri("man://invalid", &topic));
 }
 
+// Check that file:// URIs map to canonicalised real paths.
 static void
 test_file_uri_conversion(void)
 {
@@ -77,6 +81,7 @@ test_file_uri_conversion(void)
     assert(!uri_convert_file_uri("http://example.com", buf, sizeof(buf)));
 }
 
+// Verify uri_parse classifies various inputs correctly.
 static void
 test_uri_parse(void)
 {

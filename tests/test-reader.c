@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
+// Helper to write the full buffer to the pipe in one go.
 static void
 write_all_(int fd, const char *data)
 {
@@ -12,6 +13,7 @@ write_all_(int fd, const char *data)
     assert(written == (ssize_t)len);
 }
 
+// Confirm that readq_refill keeps unread bytes intact between fills.
 static void
 test_refill_preserves_unread_bytes_(void)
 {

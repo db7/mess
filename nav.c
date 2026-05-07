@@ -18,9 +18,118 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
 #include <wordexp.h>
+
+// Reason: Navigation session encapsulated input loop state.
+struct nav_session {
+    int tty_fd;
+    int notify_fd;
+    int out_fd;
+    unsigned int timeout_ms;
+    char exit_key;
+};
+
+/*
+ * Reason: Drain any pending bytes from the notification descriptor so a single
+ * event doesn't keep re-triggering the poll loop.
+ */
+static void
+nav_drain_fd_(int fd)
+{
+    if (fd < 0)
+        return;
+    char buf[64];
+    while (read(fd, buf, sizeof(buf)) > 0)
+        ;
+}
+
+struct nav_session *
+nav_session_begin(const struct nav_session_args *args)
+{
+    if (args == NULL || args->tty_fd < 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    struct nav_session *sess = calloc(1, sizeof(*sess));
+    if (sess == NULL)
+        return NULL;
+
+    sess->tty_fd     = args->tty_fd;
+    sess->notify_fd  = args->notify_fd;
+    sess->out_fd     = args->out_fd;
+    sess->timeout_ms = args->timeout_ms;
+    sess->exit_key   = args->exit_key ? args->exit_key : '\x1b';
+    return sess;
+}
+
+nav_event_t
+nav_session_run(struct nav_session *sess)
+{
+    if (sess == NULL) {
+        errno = EINVAL;
+        return NAV_EVENT_ERROR;
+    }
+
+    struct pollfd fds[2];
+    nfds_t nfds      = 0;
+    int tty_index    = -1;
+    int notify_index = -1;
+
+    if (sess->tty_fd >= 0) {
+        tty_index         = (int)nfds;
+        fds[nfds].fd      = sess->tty_fd;
+        fds[nfds].events  = POLLIN | POLLHUP | POLLERR;
+        fds[nfds].revents = 0;
+        nfds++;
+    }
+    if (sess->notify_fd >= 0) {
+        notify_index      = (int)nfds;
+        fds[nfds].fd      = sess->notify_fd;
+        fds[nfds].events  = POLLIN | POLLHUP | POLLERR;
+        fds[nfds].revents = 0;
+        nfds++;
+    }
+
+    int timeout = sess->timeout_ms ? (int)sess->timeout_ms : -1;
+
+    for (;;) {
+        int prc = poll(fds, nfds, timeout);
+        if (prc == -1) {
+            if (errno == EINTR)
+                continue;
+            return NAV_EVENT_ERROR;
+        }
+        if (prc == 0)
+            return NAV_EVENT_TIMEOUT;
+
+        if (notify_index >= 0 &&
+            (fds[notify_index].revents & (POLLIN | POLLERR | POLLHUP))) {
+            nav_drain_fd_(sess->notify_fd);
+            return NAV_EVENT_DIRTY;
+        }
+
+        if (tty_index >= 0 &&
+            (fds[tty_index].revents & (POLLIN | POLLERR | POLLHUP))) {
+            char ch   = 0;
+            ssize_t n = read(sess->tty_fd, &ch, 1);
+            if (n <= 0)
+                return NAV_EVENT_EXIT;
+            if (ch == sess->exit_key || ch == '\x1b')
+                return NAV_EVENT_EXIT;
+            /* Ignore other keys and continue polling. */
+        }
+    }
+}
+
+void
+nav_session_end(struct nav_session *sess)
+{
+    if (sess == NULL)
+        return;
+    free(sess);
+}
 
 // Reason: Store per-link metadata so we can highlight and launch captured OSC 8
 // hyperlinks later.
@@ -44,7 +153,8 @@ static int url_head_;
 // Reason: Cache the logical selection index; -1 means navigation mode is
 // inactive.
 static int selected_idx_ = -1;
-// Reason: Track whether navigation mode is active even when no link is selected.
+// Reason: Track whether navigation mode is active even when no link is
+// selected.
 static bool nav_active_;
 // Reason: Remember which launcher should open links when activated.
 static nav_launcher_fn current_launcher_;
@@ -54,7 +164,12 @@ static bool needs_refresh_;
 // launch_with_editor_.
 static nav_editor_fn editor_launcher_;
 // Reason: Represent the possible states for the status/overlay line.
-typedef enum { STATUS_NONE = 0, STATUS_LINK, STATUS_HELP, STATUS_DEBUG } status_mode_t;
+typedef enum {
+    STATUS_NONE = 0,
+    STATUS_LINK,
+    STATUS_HELP,
+    STATUS_DEBUG
+} status_mode_t;
 
 // Reason: File descriptor used to render status lines inside the terminal UI.
 static int status_fd_ = -1;
@@ -73,21 +188,26 @@ static nav_mode_t nav_mode_ = NAV_MODE_OSC8;
 static bool force_drain_;
 // Reason: Toggle per-link coloring when requested via 'd'.
 static bool colorize_links_;
+// Reason: Allow freezing the navigation overlay so the buffer stops updating.
 static bool freeze_enabled_ = true;
+// Reason: Track whether the visible output differs from buffered snapshot data.
 static bool output_dirty_;
+// Reason: Heap buffer holding the most recent captured frame when frozen.
 static char *snapshot_buf_;
+// Reason: Length of snapshot_buf_ currently populated with valid bytes.
 static size_t snapshot_len_;
+// Reason: Remember that a snapshot should be taken after the next redraw.
 static bool snapshot_pending_;
+// Reason: Indicate that snapshot_buf_ contains a frame ready for display.
 static bool snapshot_ready_;
-static bool snapshot_deadline_set_;
-static struct timespec snapshot_deadline_;
-static long snapshot_idle_ms_ = 120;
 // Reason: Distinct ANSI palettes for link markers/highlighting.
 static const char *const link_color_table_[] = {
     "\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m",
     "\x1b[35m", "\x1b[36m", "\x1b[91m", "\x1b[94m"};
+// Reason: Track how many entries exist in link_color_table_.
 static const size_t link_color_count_ =
     sizeof(link_color_table_) / sizeof(link_color_table_[0]);
+// Reason: ANSI sequence that reverts text colouring back to normal.
 static const char color_reset_[] = "\x1b[0m";
 // Reason: Remember how many lines of the debug overlay are currently painted.
 static int debug_overlay_lines_;
@@ -127,9 +247,9 @@ static void maybe_render_nav_pip_(void);
 static ssize_t nav_process_output_osc_(struct readq *bq, bool drain);
 static ssize_t nav_process_output_man_(struct readq *bq, bool drain);
 static size_t nav_render_highlighted_osc_(const char *input, size_t len,
-        char *dest, size_t dest_cap);
+                                          char *dest, size_t dest_cap);
 static size_t nav_render_highlighted_man_(const char *input, size_t len,
-        char *dest, size_t dest_cap);
+                                          char *dest, size_t dest_cap);
 static bool nav_pair_matches_selection_(const char *link, size_t link_len,
                                         const char *text, size_t text_len);
 static const char *color_for_bytes_(const char *data, size_t len);
@@ -153,8 +273,8 @@ static bool man_is_section_char_(char ch);
 #define SHIFT_TAB_SEQ_LEN         3
 #define SHIFT_TAB_POLL_TIMEOUT_MS 10
 
+static size_t leading_csi_len_(const char *data, size_t len);
 static void free_snapshot_(void);
-static void snapshot_set_deadline_ms_(long ms);
 
 // Reason: Helper to opportunistically pull more bytes for multi-byte escape
 // detection.
@@ -267,6 +387,7 @@ nav_process_input(char *c, ssize_t *nread, size_t capacity)
     return out_idx > 0;
 }
 
+// Reason: Pull extra bytes from the key input FD to complete escape sequences.
 static ssize_t
 read_more_input_(char *dest, size_t max)
 {
@@ -380,6 +501,7 @@ handle_key_input_(char key)
 #define HIGHLIGHT_ON  "\x1b[7m"
 #define HIGHLIGHT_OFF "\x1b[27m"
 
+// Reason: Compare two link strings while tolerating NULL pointers.
 static bool
 links_equal_(const char *a, const char *b)
 {
@@ -390,6 +512,7 @@ links_equal_(const char *a, const char *b)
     return strcmp(a, b) == 0;
 }
 
+// Reason: Translate a logical selection index into the stored link string.
 static const char *
 link_for_logical_(int idx)
 {
@@ -399,6 +522,7 @@ link_for_logical_(int idx)
     return urls_[physical].link;
 }
 
+// Reason: Find the first index in the contiguous run containing idx.
 static int
 group_start_index_(int idx)
 {
@@ -418,6 +542,7 @@ group_start_index_(int idx)
     return idx;
 }
 
+// Reason: Locate the last index in the current logical group.
 static int
 group_end_index_(int idx)
 {
@@ -437,6 +562,7 @@ group_end_index_(int idx)
     return idx;
 }
 
+// Reason: Advance to the next group boundary in the requested direction.
 static int
 next_group_start_(int idx, int direction)
 {
@@ -462,6 +588,7 @@ next_group_start_(int idx, int direction)
     return group_start_index_(idx);
 }
 
+// Reason: Move the active selection forward or backward through grouped links.
 static bool
 cycle_link_selection_(int direction)
 {
@@ -507,6 +634,7 @@ cycle_link_selection_(int direction)
 }
 
 
+// Reason: Locate a byte-range within another sequence without relying on '\0'.
 static const char *
 find_subsequence_(const char *haystack, size_t hay_len, const char *needle,
                   size_t needle_len)
@@ -525,7 +653,7 @@ find_subsequence_(const char *haystack, size_t hay_len, const char *needle,
 ssize_t
 nav_process_output(struct readq *bq)
 {
-    bool drain = force_drain_;
+    bool drain   = force_drain_;
     force_drain_ = false;
     if (!bq)
         return 0;
@@ -540,6 +668,7 @@ nav_process_output(struct readq *bq)
     }
 }
 
+// Reason: Parse OSC 8 sequences from the read queue and harvest link metadata.
 static ssize_t
 nav_process_output_osc_(struct readq *bq, bool drain)
 {
@@ -616,6 +745,7 @@ nav_process_output_osc_(struct readq *bq, bool drain)
     return bq->start;
 }
 
+// Reason: Process man(1) pages to discover cross references and annotate them.
 static ssize_t
 nav_process_output_man_(struct readq *bq, bool drain)
 {
@@ -656,6 +786,7 @@ nav_render_highlighted(const char *input, size_t len, char *dest,
     }
 }
 
+// Reason: Rewrite OSC 8 payloads with navigation highlighting applied.
 static size_t
 nav_render_highlighted_osc_(const char *input, size_t len, char *dest,
                             size_t dest_cap)
@@ -721,7 +852,7 @@ nav_render_highlighted_osc_(const char *input, size_t len, char *dest,
         }
 
         const char *second_semicolon = memchr(
-                                           first_semicolon + 1, ';', (input + len) - (first_semicolon + 1));
+            first_semicolon + 1, ';', (input + len) - (first_semicolon + 1));
         if (!second_semicolon) {
             size_t chunk = len - pos;
             if (out + chunk > dest_cap)
@@ -745,8 +876,8 @@ nav_render_highlighted_osc_(const char *input, size_t len, char *dest,
         }
 
         const char *text_start = link_end + link_term_len;
-        const char *text_end = find_subsequence_(
-                                   text_start, (input + len) - text_start, osc8_close, closing_len);
+        const char *text_end   = find_subsequence_(
+              text_start, (input + len) - text_start, osc8_close, closing_len);
         if (!text_end) {
             size_t chunk = len - pos;
             if (out + chunk > dest_cap)
@@ -764,13 +895,13 @@ nav_render_highlighted_osc_(const char *input, size_t len, char *dest,
 
         size_t link_len = (size_t)(link_end - link_start);
         size_t text_len = (size_t)(text_end - text_start);
-        bool highlight  =
-            nav_pair_matches_selection_(link_start, link_len, text_start, text_len);
-        const char *color_code     = NULL;
-        size_t color_len           = 0;
-        const size_t reset_len     = sizeof(color_reset_) - 1;
-        size_t color_source_len    = 0;
-        const char *color_source   = NULL;
+        bool highlight  = nav_pair_matches_selection_(link_start, link_len,
+                                                      text_start, text_len);
+        const char *color_code   = NULL;
+        size_t color_len         = 0;
+        const size_t reset_len   = sizeof(color_reset_) - 1;
+        size_t color_source_len  = 0;
+        const char *color_source = NULL;
         if (colorize_links_) {
             color_source     = url_count_ > 0 ? NULL : link_start;
             color_source_len = link_len;
@@ -802,13 +933,35 @@ nav_render_highlighted_osc_(const char *input, size_t len, char *dest,
         }
 
         if (highlight) {
-            if (out + highlight_on_len + text_len + highlight_off_len >
-                dest_cap)
+            if (out + highlight_on_len > dest_cap)
                 return 0;
             memcpy(dest + out, HIGHLIGHT_ON, highlight_on_len);
             out += highlight_on_len;
-            memcpy(dest + out, text_start, text_len);
-            out += text_len;
+
+            size_t consumed = 0;
+            while (consumed < text_len) {
+                size_t esc_len = leading_csi_len_(text_start + consumed,
+                                                  text_len - consumed);
+                if (esc_len == 0)
+                    break;
+                if (out + esc_len > dest_cap)
+                    return 0;
+                memcpy(dest + out, text_start + consumed, esc_len);
+                out += esc_len;
+                consumed += esc_len;
+                if (out + highlight_on_len > dest_cap)
+                    return 0;
+                memcpy(dest + out, HIGHLIGHT_ON, highlight_on_len);
+                out += highlight_on_len;
+            }
+
+            size_t remaining = text_len - consumed;
+            if (out + remaining + highlight_off_len > dest_cap)
+                return 0;
+            if (remaining > 0) {
+                memcpy(dest + out, text_start + consumed, remaining);
+                out += remaining;
+            }
             memcpy(dest + out, HIGHLIGHT_OFF, highlight_off_len);
             out += highlight_off_len;
         } else {
@@ -836,6 +989,7 @@ nav_render_highlighted_osc_(const char *input, size_t len, char *dest,
     return out;
 }
 
+// Reason: Highlight man-page cross references while preserving colour codes.
 static size_t
 nav_render_highlighted_man_(const char *input, size_t len, char *dest,
                             size_t dest_cap)
@@ -858,9 +1012,8 @@ nav_render_highlighted_man_(const char *input, size_t len, char *dest,
         size_t section_offset;
         size_t section_len = 0;
         size_t token_len   = 0;
-        if (!man_match_at_(
-                plain, plain_len, pos, &name_len, &section_offset, &section_len,
-                &token_len)) {
+        if (!man_match_at_(plain, plain_len, pos, &name_len, &section_offset,
+                           &section_len, &token_len)) {
             pos++;
             continue;
         }
@@ -868,12 +1021,11 @@ nav_render_highlighted_man_(const char *input, size_t len, char *dest,
         const char *name    = plain + pos;
         const char *section = name + section_offset;
         char link_buf[MAN_NAME_MAX + MAN_SECTION_MAX + 16];
-        size_t link_len =
-            man_format_link_(link_buf, sizeof(link_buf), name, name_len,
-                             section, section_len);
-        bool highlight = link_len > 0 &&
-                         nav_pair_matches_selection_(link_buf, link_len, name,
-                             token_len);
+        size_t link_len = man_format_link_(link_buf, sizeof(link_buf), name,
+                                           name_len, section, section_len);
+        bool highlight =
+            link_len > 0 &&
+            nav_pair_matches_selection_(link_buf, link_len, name, token_len);
         const char *color_code = NULL;
         size_t color_len       = 0;
         const size_t reset_len = sizeof(color_reset_) - 1;
@@ -953,6 +1105,7 @@ nav_render_highlighted_man_(const char *input, size_t len, char *dest,
     return out;
 }
 
+// Reason: Validate characters allowed in the manpage symbol portion.
 static bool
 man_is_name_char_(char ch)
 {
@@ -961,6 +1114,7 @@ man_is_name_char_(char ch)
     return isalnum((unsigned char)ch) || ch == '_' || ch == '-';
 }
 
+// Reason: Validate characters permitted in the manpage section suffix.
 static bool
 man_is_section_char_(char ch)
 {
@@ -969,6 +1123,7 @@ man_is_section_char_(char ch)
     return isalnum((unsigned char)ch) || ch == '.' || ch == '_';
 }
 
+// Reason: Detect tokens of the form name(section) starting at the given index.
 static bool
 man_match_at_(const char *data, size_t len, size_t pos, size_t *name_len,
               size_t *section_offset, size_t *section_len, size_t *token_len)
@@ -1013,6 +1168,7 @@ man_match_at_(const char *data, size_t len, size_t pos, size_t *name_len,
     return true;
 }
 
+// Reason: Compose a man:// URI for later dispatch based on matched tokens.
 static size_t
 man_format_link_(char *dest, size_t cap, const char *name, size_t name_len,
                  const char *section, size_t section_len)
@@ -1030,6 +1186,7 @@ man_format_link_(char *dest, size_t cap, const char *name, size_t name_len,
     return (size_t)written;
 }
 
+// Reason: Walk a cleaned manpage slice to capture every cross-reference token.
 static void
 nav_scan_man_chunk_(const char *data, size_t len)
 {
@@ -1051,9 +1208,8 @@ nav_scan_man_chunk_(const char *data, size_t len)
         const char *name    = plain + pos;
         const char *section = name + section_offset;
         char link_buf[MAN_NAME_MAX + MAN_SECTION_MAX + 16];
-        size_t link_len =
-            man_format_link_(link_buf, sizeof(link_buf), name, name_len,
-                             section, section_len);
+        size_t link_len = man_format_link_(link_buf, sizeof(link_buf), name,
+                                           name_len, section, section_len);
         if (link_len > 0) {
             // Reason: Copy the discovered token into navigation storage using
             // the cleaned text so status overlays stay readable.
@@ -1063,6 +1219,7 @@ nav_scan_man_chunk_(const char *data, size_t len)
     }
 }
 
+// Reason: Remove overstrike formatting while mapping bytes back to originals.
 static size_t
 man_strip_overstrike_(const char *data, size_t len, char *dest, size_t dest_cap,
                       size_t *map)
@@ -1111,6 +1268,7 @@ man_strip_overstrike_(const char *data, size_t len, char *dest, size_t dest_cap,
     return out;
 }
 
+// Reason: Preserve enough trailing bytes to complete tokens split across reads.
 static size_t
 man_suffix_to_keep_(const char *data, size_t len, bool drain)
 {
@@ -1129,7 +1287,7 @@ man_suffix_to_keep_(const char *data, size_t len, bool drain)
     return keep;
 }
 
-// Decode an OSC 8 sequence into a link/text pair.
+// Reason: Decode an OSC 8 sequence into a link/text pair.
 static LinkEntry
 extract_osc8_(const char *input)
 {
@@ -1243,7 +1401,7 @@ nav_reset(void)
     force_drain_         = false;
     colorize_links_      = false;
     debug_overlay_lines_ = 0;
-    pip_needs_redraw_     = false;
+    pip_needs_redraw_    = false;
     freeze_enabled_      = true;
     output_dirty_        = false;
     nav_mode_            = NAV_MODE_OSC8;
@@ -1252,8 +1410,8 @@ nav_reset(void)
 void
 nav_set_mode(nav_mode_t mode)
 {
-    // Reason: Allow callers to flip parsers per-invocation without reinitializing
-    // the rest of the navigation subsystem.
+    // Reason: Allow callers to flip parsers per-invocation without
+    // reinitializing the rest of the navigation subsystem.
     nav_mode_ = mode;
 }
 
@@ -1271,6 +1429,7 @@ nav_request_drain(void)
     force_drain_ = true;
 }
 
+// Reason: Insert or rotate a link entry within the ring buffer.
 static void
 nav_store_entry_(char *link, char *text, size_t text_len)
 {
@@ -1296,6 +1455,7 @@ nav_store_entry_(char *link, char *text, size_t text_len)
         current_launcher_ = launch_with_mess_;
 }
 
+// Reason: Copy a discovered link/text pair into owned navigation storage.
 static bool
 nav_record_link_copy_(const char *link, size_t link_len, const char *text,
                       size_t text_len)
@@ -1313,9 +1473,11 @@ nav_record_link_copy_(const char *link, size_t link_len, const char *text,
     return true;
 }
 
+// Reason: Check whether a candidate link/text pair matches the current
+// selection.
 static bool
-nav_pair_matches_selection_(const char *link, size_t link_len,
-                            const char *text, size_t text_len)
+nav_pair_matches_selection_(const char *link, size_t link_len, const char *text,
+                            size_t text_len)
 {
     if (selected_idx_ < 0 || url_count_ <= 0 || !link || !text)
         return false;
@@ -1340,6 +1502,7 @@ nav_pair_matches_selection_(const char *link, size_t link_len,
     return false;
 }
 
+// Reason: Derive a stable colour choice based on the link bytes.
 static const char *
 color_for_bytes_(const char *data, size_t len)
 {
@@ -1396,6 +1559,7 @@ nav_document_path(void)
     return current_document_path_();
 }
 
+// Reason: Look up the current document path from the environment when needed.
 static const char *
 current_document_path_(void)
 {
@@ -1413,6 +1577,7 @@ nav_request_refresh(void)
     needs_refresh_ = true;
 }
 
+// Reason: Render a single status line at the bottom of the terminal.
 static void
 write_status_line_(const char *text, size_t explicit_len, status_mode_t mode)
 {
@@ -1461,9 +1626,8 @@ write_status_line_(const char *text, size_t explicit_len, status_mode_t mode)
         len      = build_help_overlay_(rendered, sizeof(rendered), width);
         out_text = rendered;
     } else {
-        len = (explicit_len == (size_t)-1)
-                  ? (out_text ? strlen(out_text) : 0)
-                  : explicit_len;
+        len = (explicit_len == (size_t)-1) ? (out_text ? strlen(out_text) : 0) :
+                                             explicit_len;
         if (width > 0 && len > width)
             len = width;
     }
@@ -1559,6 +1723,26 @@ nav_set_output_dirty(bool dirty)
     request_nav_pip_refresh_();
 }
 
+// Reason: Determine the length of a CSI escape sequence at the front of data.
+static size_t
+leading_csi_len_(const char *data, size_t len)
+{
+    if (!data || len < 2)
+        return 0;
+    if (data[0] != '\x1b')
+        return 0;
+    if ((unsigned char)data[1] != '[')
+        return 0;
+    size_t idx = 2;
+    while (idx < len) {
+        unsigned char ch = (unsigned char)data[idx++];
+        if (ch >= '@' && ch <= '~')
+            return idx;
+    }
+    return len;
+}
+
+// Reason: Release any buffered snapshot frame and reset bookkeeping.
 static void
 free_snapshot_(void)
 {
@@ -1567,37 +1751,12 @@ free_snapshot_(void)
     snapshot_len_ = 0;
 }
 
-static void
-snapshot_set_deadline_ms_(long ms)
-{
-    if (ms <= 0) {
-        snapshot_deadline_set_ = false;
-        return;
-    }
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
-        snapshot_deadline_set_ = false;
-        return;
-    }
-
-    snapshot_deadline_ = now;
-    snapshot_deadline_.tv_sec += ms / 1000;
-    long extra_nsec = (ms % 1000) * 1000000L;
-    snapshot_deadline_.tv_nsec += extra_nsec;
-    if (snapshot_deadline_.tv_nsec >= 1000000000L) {
-        snapshot_deadline_.tv_sec += 1;
-        snapshot_deadline_.tv_nsec -= 1000000000L;
-    }
-    snapshot_deadline_set_ = true;
-}
-
 void
 nav_begin_snapshot(void)
 {
     free_snapshot_();
-    snapshot_pending_      = true;
-    snapshot_ready_        = false;
-    snapshot_deadline_set_ = false;
+    snapshot_pending_ = true;
+    snapshot_ready_   = false;
 }
 
 bool
@@ -1627,35 +1786,6 @@ nav_append_snapshot(const char *data, size_t len)
     snapshot_buf_ = newbuf;
     memcpy(snapshot_buf_ + snapshot_len_, data, len);
     snapshot_len_ += len;
-    snapshot_set_deadline_ms_(snapshot_idle_ms_);
-}
-
-bool
-nav_snapshot_timeout(struct timeval *tv)
-{
-    if (!snapshot_pending_ || !snapshot_deadline_set_ || !tv)
-        return false;
-
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-        return false;
-
-    time_t sec_diff = snapshot_deadline_.tv_sec - now.tv_sec;
-    long nsec_diff  = snapshot_deadline_.tv_nsec - now.tv_nsec;
-    if (nsec_diff < 0) {
-        sec_diff--;
-        nsec_diff += 1000000000L;
-    }
-    if (sec_diff < 0 || (sec_diff == 0 && nsec_diff <= 0)) {
-        nav_snapshot_finish();
-        return false;
-    }
-
-    tv->tv_sec  = sec_diff;
-    tv->tv_usec = (suseconds_t)(nsec_diff / 1000L);
-    if (tv->tv_sec == 0 && tv->tv_usec == 0)
-        tv->tv_usec = 1;
-    return true;
 }
 
 bool
@@ -1664,8 +1794,7 @@ nav_snapshot_finish(void)
     if (!snapshot_pending_)
         return false;
 
-    snapshot_pending_      = false;
-    snapshot_deadline_set_ = false;
+    snapshot_pending_ = false;
 
     if (snapshot_len_ == 0) {
         snapshot_ready_ = false;
@@ -1686,7 +1815,7 @@ nav_emit_snapshot(void)
     if (cap == 0)
         return;
 
-    char *render = malloc(cap);
+    char *render    = malloc(cap);
     const char *out = snapshot_buf_;
     size_t out_len  = snapshot_len_;
     if (render) {
@@ -1713,18 +1842,10 @@ nav_drop_snapshot(void)
 {
     snapshot_pending_ = false;
     snapshot_ready_   = false;
-    snapshot_deadline_set_ = false;
     free_snapshot_();
 }
 
-void
-nav_set_snapshot_idle_timeout_ms(long ms)
-{
-    if (ms < 0)
-        ms = 0;
-    snapshot_idle_ms_ = ms;
-}
-
+// Reason: Enter help overlay mode so the next status render shows shortcuts.
 static void
 show_help_overlay_(void)
 {
@@ -1732,6 +1853,7 @@ show_help_overlay_(void)
     status_pending_hide_ = true;
 }
 
+// Reason: Toggle the debug overlay showing diagnostic state.
 static void
 toggle_debug_overlay_(void)
 {
@@ -1743,6 +1865,7 @@ toggle_debug_overlay_(void)
     status_pending_hide_ = false;
 }
 
+// Reason: Build the inline help text shown at the bottom of the screen.
 static size_t
 build_help_overlay_(char *dest, size_t cap, size_t width)
 {
@@ -1750,8 +1873,8 @@ build_help_overlay_(char *dest, size_t cap, size_t width)
         return 0;
 
     const char *segments[] = {"Tab next", "S-Tab prev", "Enter open",
-                              "v edit",   "s link",     "d color",  "D debug",
-                              "Esc exit"};
+                              "v edit",   "s link",     "d color",
+                              "D debug",  "Esc exit"};
     const size_t seg_count = sizeof(segments) / sizeof(segments[0]);
     const char *separator  = "  ";
     size_t sep_len         = strlen(separator);
@@ -1803,6 +1926,7 @@ build_help_overlay_(char *dest, size_t cap, size_t width)
     return used;
 }
 
+// Reason: Wipe previously rendered debug overlay rows from the terminal.
 static void
 clear_debug_overlay_lines_(void)
 {
@@ -1826,6 +1950,7 @@ clear_debug_overlay_lines_(void)
     debug_overlay_lines_ = 0;
 }
 
+// Reason: Paint an overlay summarising captured links for debugging.
 static void
 render_debug_overlay_lines_(void)
 {
@@ -1860,20 +1985,20 @@ render_debug_overlay_lines_(void)
         if (seen_count >= (size_t)ws.ws_row)
             break;
         seen[seen_count++] = link;
-        int row = ws.ws_row - (int)seen_count + 1;
+        int row            = ws.ws_row - (int)seen_count + 1;
         if (row < 1)
             break;
         int movelen = snprintf(move, sizeof(move), "\033[%d;1H", row);
         if (movelen > 0)
             (void)write(status_fd_, move, (size_t)movelen);
         (void)write(status_fd_, clear_seq, sizeof(clear_seq) - 1);
-        const char *text  = urls_[physical].text ? urls_[physical].text : "";
-        const char *color = (link && link[0])
-                                ? color_for_bytes_(link, strlen(link))
-                                : NULL;
+        const char *text = urls_[physical].text ? urls_[physical].text : "";
+        const char *color =
+            (link && link[0]) ? color_for_bytes_(link, strlen(link)) : NULL;
         char line[512];
-        int len = snprintf(line, sizeof(line), "%s\x1b[7m  \x1b[0m %s => %s%s",
-                           color ? color : "", text, link, color ? color_reset_ : "");
+        int len =
+            snprintf(line, sizeof(line), "%s\x1b[7m  \x1b[0m %s => %s%s",
+                     color ? color : "", text, link, color ? color_reset_ : "");
         if (len > 0)
             (void)write(status_fd_, line, (size_t)len);
     }
@@ -1881,6 +2006,7 @@ render_debug_overlay_lines_(void)
     debug_overlay_lines_ = (int)seen_count;
 }
 
+// Reason: Draw the navigation picture-in-picture indicator in the top corner.
 static void
 render_nav_mode_pip_(bool active)
 {
@@ -1895,9 +2021,9 @@ render_nav_mode_pip_(bool active)
     if (freeze_enabled_)
         extras[extra_len++] = 'F';
     extras[extra_len++] = output_dirty_ ? '!' : ' ';
-    extras[extra_len] = '\0';
-    size_t total_len  = strlen(label) + extra_len;
-    int start_col      = ws.ws_col - (int)total_len + 1;
+    extras[extra_len]   = '\0';
+    size_t total_len    = strlen(label) + extra_len;
+    int start_col       = ws.ws_col - (int)total_len + 1;
     if (start_col < 1)
         start_col = 1;
     char move[32];
@@ -1906,7 +2032,8 @@ render_nav_mode_pip_(bool active)
         (void)write(status_fd_, move, (size_t)movelen);
     if (active) {
         char buf[48];
-        int len = snprintf(buf, sizeof(buf), "\x1b[7m%s%s\x1b[0m", label, extras);
+        int len =
+            snprintf(buf, sizeof(buf), "\x1b[7m%s%s\x1b[0m", label, extras);
         if (len > 0)
             (void)write(status_fd_, buf, (size_t)len);
     } else {
@@ -1921,12 +2048,14 @@ render_nav_mode_pip_(bool active)
     }
 }
 
+// Reason: Schedule a nav-mode pip redraw on the next status update.
 static void
 request_nav_pip_refresh_(void)
 {
     pip_needs_redraw_ = true;
 }
 
+// Reason: Redraw the pip immediately if a refresh was previously requested.
 static void
 maybe_render_nav_pip_(void)
 {
@@ -1987,7 +2116,7 @@ nav_status_visible(void)
     return status_mode_ != STATUS_NONE;
 }
 
-// Free any dynamic fields on the supplied LinkEntry.
+// Reason: Free any dynamic fields on the supplied LinkEntry.
 static void
 free_pair_(LinkEntry *pair)
 {
@@ -2006,7 +2135,7 @@ free_pair_(LinkEntry *pair)
     pair->len = 0;
 }
 
-// Map a logical selection index into the ring buffer slot.
+// Reason: Map a logical selection index into the ring buffer slot.
 static int
 logical_to_physical_(int idx)
 {
@@ -2018,7 +2147,7 @@ logical_to_physical_(int idx)
     return (url_head_ + idx) % MAX_URLS;
 }
 
-// Shell out to mess --open for the given link.
+// Reason: Shell out to mess --open for the given link.
 static int
 launch_with_mess_(const char *link, const char *text)
 {
@@ -2077,6 +2206,7 @@ nav_set_input_fd(int fd)
     input_fd_ = fd;
 }
 
+// Reason: Reset navigation state and optionally trigger a redraw.
 static void
 leave_navigation_mode_(bool request_refresh)
 {
@@ -2092,6 +2222,7 @@ leave_navigation_mode_(bool request_refresh)
     pip_needs_redraw_ = false;
 }
 
+// Reason: Dump status bytes to an optional debug log for troubleshooting.
 static void
 debug_status_bytes_(const char *tag, const void *buf, size_t len)
 {

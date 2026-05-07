@@ -23,6 +23,35 @@ typedef enum {
     NAV_MODE_MAN  = 1,
 } nav_mode_t;
 
+/*
+ * Result codes produced by the navigation session loop.
+ */
+typedef enum {
+    NAV_EVENT_EXIT = 0,   /* user requested exit */
+    NAV_EVENT_DIRTY,      /* external notification requests refresh */
+    NAV_EVENT_TIMEOUT,    /* poll timeout elapsed without events */
+    NAV_EVENT_ERROR       /* I/O error */
+} nav_event_t;
+
+struct nav_session;
+
+/*
+ * Arguments required to start a navigation session.
+ * If timeout_ms is zero, the polling loop blocks indefinitely.
+ * exit_key defaults to ESC when zero.
+ */
+struct nav_session_args {
+    int tty_fd;
+    int notify_fd;
+    int out_fd;
+    unsigned int timeout_ms;
+    char exit_key;
+};
+
+struct nav_session *nav_session_begin(const struct nav_session_args *);
+nav_event_t nav_session_run(struct nav_session *);
+void nav_session_end(struct nav_session *);
+
 // Extract USC8 links from pager output, keeping URLs stored in internal state.
 ssize_t nav_process_output(struct readq *bq);
 
@@ -81,11 +110,9 @@ void nav_begin_snapshot(void);
 bool nav_snapshot_collecting(void);
 void nav_append_snapshot(const char *data, size_t len);
 bool nav_snapshot_ready(void);
-bool nav_snapshot_timeout(struct timeval *tv);
 bool nav_snapshot_finish(void);
 void nav_emit_snapshot(void);
 void nav_drop_snapshot(void);
-void nav_set_snapshot_idle_timeout_ms(long ms);
 
 // Toggle between supported navigation parsers.
 void nav_set_mode(nav_mode_t mode);
