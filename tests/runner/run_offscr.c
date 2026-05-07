@@ -1,3 +1,12 @@
+// RUN: cat ../data/sample1.md | %b | %check
+//
+// CHECK: https://gist.github.com/egmontkob/
+// CHECK: https://gist.github.com/egmontkob/
+// CHECK: https://lynx.browser.org/
+// CHECK-SAME: https://kristaps.bsd.lv/lowdown
+// CHECK: wordexp(3)
+// CHECK-NOT: wordexp.3
+
 #include "offscr.h"
 
 #include <errno.h>

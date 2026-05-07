@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -143,6 +144,18 @@ test_capture_respects_line_limit_(void)
 	offscr_free(ctx);
 }
 
+static void
+test_offscr_extract_detects_cursor_move(void)
+{
+	const char sample[] = "\x1b[Afoo";
+	struct offscr_view view = {
+		.data = sample,
+		.len  = strlen(sample),
+	};
+	char *line = offscr_extract(&view, 0);
+	assert(line == NULL);
+}
+
 int
 main(void)
 {
@@ -150,6 +163,7 @@ main(void)
 	test_capture_timeout_();
 	test_capture_respects_limit_();
 	test_capture_respects_line_limit_();
+	test_offscr_extract_detects_cursor_move();
 	puts("offscr tests OK");
 	return 0;
 }

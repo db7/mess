@@ -68,8 +68,8 @@ main(void)
                         "[%s] [%zu] (%zu,%zu)-(%zu,%zu)"
                         " \"%s\" -> %s\n",
                         span->kind == LINKS_KIND_OSC8 ? "osc8" : "man",
-                        matches[mi], span->start.row, span->start.col,
-                        span->end.row, span->end.col, span->text, span->link);
+                        matches[mi], span->row, span->columns.start,
+                        span->row, span->columns.end, span->text, span->link);
                 }
                 free(matches);
             }

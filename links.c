@@ -1,4 +1,5 @@
 #include "links.h"
+#include "strbuf.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -11,9 +12,7 @@ ensure_capacity_(struct link_iter *res, size_t needed)
 {
     if (needed <= res->capacity)
         return 0;
-    size_t cap = res->capacity;
-    if (cap == 0)
-        cap = 4;
+    size_t cap = res->capacity == 0 ? 4 : res->capacity;
     while (cap < needed)
         cap *= 2;
     struct link_span *span = realloc(res->spans, cap * sizeof(*span));
@@ -38,8 +37,9 @@ dup_range_(const char *start, size_t len)
 
 static int
 record_span_(struct link_iter *res, const char *link_begin, size_t link_len,
-             const char *text_begin, size_t text_len, struct link_pos start,
-             struct link_pos end, enum link_kind kind)
+             const char *text_begin, size_t text_len, size_t row,
+             size_t row_offset, struct range cols, struct range indices,
+             enum link_kind kind)
 {
     if (ensure_capacity_(res, res->count + 1) == -1)
         return -1;
@@ -49,29 +49,18 @@ record_span_(struct link_iter *res, const char *link_begin, size_t link_len,
     if (span->link == NULL)
         return -1;
     span->text = dup_range_(text_begin, text_len);
-    if (span->text == NULL)
+    if (span->text == NULL) {
+        free(span->link);
         return -1;
-    span->text_len  = text_len;
-    span->start.row = start.row;
-    span->start.col = start.col;
-    span->end.row   = end.row;
-    span->end.col   = end.col;
-    span->kind      = kind;
+    }
+    span->text_len   = text_len;
+    span->row        = row;
+    span->row_offset = row_offset;
+    span->columns    = cols;
+    span->indices    = indices;
+    span->kind       = kind;
     res->count++;
     return 0;
-}
-
-static void
-line_advance_(char ch, struct link_pos *pos)
-{
-    if (ch == '\n') {
-        pos->row++;
-        pos->col = 0;
-    } else if (ch == '\r') {
-        pos->col = 0;
-    } else {
-        pos->col++;
-    }
 }
 
 static int
@@ -99,20 +88,26 @@ man_format_link_(char *dest, size_t cap, const char *name, size_t name_len,
     return (size_t)written;
 }
 
-static size_t
-strip_decorations_(const char *data, size_t len, char *dest, size_t dest_cap,
-                   size_t *map)
+static int
+strip_decorations_(const char *data, size_t len, struct strbuf *dest,
+                   size_t *map, size_t *out_len)
 {
-    if (!data || !dest || dest_cap == 0)
-        return 0;
+    if (!data || dest == NULL)
+        return -1;
+    strbuf_reset(dest);
+    if (strbuf_reserve(dest, 0) != 0)
+        return -1;
 
     size_t out = 0;
     size_t i   = 0;
     while (i < len) {
         unsigned char ch = (unsigned char)data[i];
         if (ch == '\b') {
-            if (out > 0)
+            if (out > 0) {
                 out--;
+                dest->len       = out;
+                dest->data[out] = '\0';
+            }
             i++;
             continue;
         }
@@ -127,6 +122,18 @@ strip_decorations_(const char *data, size_t len, char *dest, size_t dest_cap,
                         if (c >= '@' && c <= '~')
                             break;
                     }
+                } else if (next == ']') {
+                    seq_end++;
+                    while (seq_end < len) {
+                        unsigned char cur = (unsigned char)data[seq_end++];
+                        if (cur == '\a')
+                            break;
+                        if (cur == '\033' && seq_end < len &&
+                            (unsigned char)data[seq_end] == '\\') {
+                            seq_end++;
+                            break;
+                        }
+                    }
                 } else {
                     seq_end++;
                 }
@@ -136,17 +143,18 @@ strip_decorations_(const char *data, size_t len, char *dest, size_t dest_cap,
             i = seq_end;
             continue;
         }
-        if (out >= dest_cap)
-            break;
-        dest[out] = (char)ch;
+        if (strbuf_push(dest, (char)ch) != 0)
+            return -1;
+        out = dest->len;
         if (map)
-            map[out] = i;
-        out++;
+            map[out - 1] = i;
         i++;
     }
-    if (out < dest_cap)
-        dest[out] = '\0';
-    return out;
+    if (map)
+        map[out] = i;
+    if (out_len)
+        *out_len = out;
+    return 0;
 }
 
 static int
@@ -189,68 +197,161 @@ man_match_at_(const char *data, size_t len, size_t pos, size_t *name_len,
 }
 
 static int
-parse_links_man(const char *buf, size_t len, struct link_iter *res)
+build_row_offsets_(const char *buf, size_t len, size_t **offsets_out,
+                   size_t *count_out)
 {
-    char *plain = malloc(len + 1);
-    if (plain == NULL)
+    if (!buf || !offsets_out || !count_out)
         return -1;
+    size_t cap      = 16;
+    size_t count    = 0;
+    size_t *offsets = malloc(cap * sizeof(*offsets));
+    if (offsets == NULL)
+        return -1;
+    offsets[count++] = 0;
+    for (size_t idx = 0; idx < len; ++idx) {
+        if (buf[idx] == '\n') {
+            if (count == cap) {
+                cap *= 2;
+                size_t *tmp = realloc(offsets, cap * sizeof(*tmp));
+                if (tmp == NULL) {
+                    free(offsets);
+                    return -1;
+                }
+                offsets = tmp;
+            }
+            offsets[count++] = idx + 1;
+        }
+    }
+    *offsets_out = offsets;
+    *count_out   = count;
+    return 0;
+}
 
-    size_t plain_len = strip_decorations_(buf, len, plain, len + 1, NULL);
+static size_t
+row_offset_for_(const size_t *offsets, size_t count, size_t row)
+{
+    if (offsets == NULL || count == 0)
+        return 0;
+    if (row < count)
+        return offsets[row];
+    return offsets[count - 1];
+}
 
+static int
+parse_links_man(const char *buf, size_t len, const size_t *row_offsets,
+                size_t row_count, struct link_iter *res)
+{
+    struct strbuf plain = STRBUF_INIT;
+    size_t *map         = malloc((len + 1) * sizeof(*map));
+    if (map == NULL) {
+        strbuf_free(&plain);
+        return -1;
+    }
+
+    size_t plain_len = 0;
+    if (strip_decorations_(buf, len, &plain, map, &plain_len) == -1) {
+        strbuf_free(&plain);
+        free(map);
+        return -1;
+    }
+    const char *plain_data = strbuf_data(&plain);
+    if (plain_data == NULL) {
+        strbuf_free(&plain);
+        free(map);
+        return -1;
+    }
     size_t cur = 0;
-    struct link_pos pos = {0};
+    size_t row = 0;
+    size_t col = 0;
 
     while (cur < plain_len) {
         size_t name_len       = 0;
         size_t section_offset = 0;
         size_t section_len    = 0;
         size_t token_len      = 0;
-        if (man_match_at_(plain, plain_len, cur, &name_len, &section_offset,
-                          &section_len, &token_len)) {
-            const char *name    = plain + cur;
-            const char *section = plain + cur + section_offset;
+        if (man_match_at_(plain_data, plain_len, cur, &name_len,
+                          &section_offset, &section_len, &token_len)) {
+            const char *name    = plain_data + cur;
+            const char *section = plain_data + cur + section_offset;
             char link_buf[128];
             size_t link_len = man_format_link_(link_buf, sizeof(link_buf), name,
                                                name_len, section, section_len);
             if (link_len > 0) {
-                struct link_pos start = pos;
-                struct link_pos tmp   = pos;
-                for (size_t k = 0; k < token_len; ++k)
-                    line_advance_(plain[cur + k], &tmp);
-                if (record_span_(res, link_buf, link_len, plain + cur,
-                                 token_len, start, tmp, LINKS_KIND_MAN) == -1) {
-                    free(plain);
+                size_t abs_start = map[cur];
+                size_t abs_end =
+                    map[cur + token_len < plain_len ? cur + token_len :
+                                                      plain_len];
+                size_t row_offset =
+                    row_offset_for_(row_offsets, row_count, row);
+                struct range columns = {
+                    .start = col,
+                    .end   = col + token_len,
+                };
+                struct range indices = {
+                    .start = abs_start - row_offset,
+                    .end   = abs_end - row_offset,
+                };
+                if (record_span_(res, link_buf, link_len, plain_data + cur,
+                                 token_len, row, row_offset, columns, indices,
+                                 LINKS_KIND_MAN) == -1) {
+                    free(map);
+                    strbuf_free(&plain);
                     return -1;
                 }
-                pos = tmp;
             }
+            col += token_len;
             cur += token_len;
             continue;
         }
-        line_advance_(plain[cur], &pos);
+
+        char ch = plain_data[cur];
+        if (ch == '\n') {
+            row++;
+            col = 0;
+        } else if (ch == '\r') {
+            col = 0;
+        } else {
+            col++;
+        }
         cur++;
     }
 
-    free(plain);
+    free(map);
+    strbuf_free(&plain);
     return 0;
 }
 
 static int
-parse_links_osc8(const char *buf, size_t len, struct link_iter *res)
+parse_links_osc8(const char *buf, size_t len, const size_t *row_offsets,
+                 size_t row_count, struct link_iter *res)
 {
-    size_t i       = 0;
-    struct link_pos pos = {0};
+    (void)row_offsets;
+    (void)row_count;
+
+    size_t row               = 0;
+    size_t col               = 0;
+    size_t row_offset        = 0;
+    size_t i                 = 0;
+    const char closing_seq[] = "\033]8;;\033\\";
+    const size_t closing_len = sizeof(closing_seq) - 1;
 
     while (i < len) {
         unsigned char ch = (unsigned char)buf[i];
         if (ch == '\n') {
-            pos.row++;
-            pos.col = 0;
+            row++;
+            col = 0;
             i++;
+            row_offset = i;
             continue;
         }
         if (ch == '\r') {
-            pos.col = 0;
+            col = 0;
+            i++;
+            continue;
+        }
+        if (ch == '\b') {
+            if (col > 0)
+                col--;
             i++;
             continue;
         }
@@ -271,37 +372,46 @@ parse_links_osc8(const char *buf, size_t len, struct link_iter *res)
             if (link_end == NULL)
                 break;
             const char *text_start = link_end + 2;
-            const char *text_end   = strstr(text_start, "\033]8;;\033\\");
+            const char *text_end   = strstr(text_start, closing_seq);
             if (text_end == NULL)
                 break;
 
-            size_t link_len   = (size_t)(link_end - link_start);
-            struct link_pos pstart = pos;
-            struct link_pos tmp    = pos;
-
-            size_t text_len = (size_t)(text_end - text_start);
-            char *plain     = malloc(text_len + 1);
-            if (plain == NULL)
-                return -1;
-            size_t plain_len =
-                strip_decorations_(text_start, text_len, plain, text_len + 1,
-                                   NULL);
-            for (size_t ti = 0; ti < text_len; ++ti)
-                line_advance_(text_start[ti], &tmp);
-
-            if (record_span_(res, link_start, link_len, plain, plain_len,
-                             pstart, tmp, LINKS_KIND_OSC8) == -1) {
-                free(plain);
+            size_t link_len     = (size_t)(link_end - link_start);
+            size_t text_span    = (size_t)(text_end - text_start);
+            struct strbuf plain = STRBUF_INIT;
+            size_t plain_len    = 0;
+            if (strip_decorations_(text_start, text_span, &plain, NULL,
+                                   &plain_len) == -1) {
+                strbuf_free(&plain);
                 return -1;
             }
-            free(plain);
-
-            pos = tmp;
-            i   = (size_t)(text_end + strlen("\033]8;;\033\\") - buf);
+            const char *plain_data = strbuf_data(&plain);
+            if (plain_data == NULL) {
+                strbuf_free(&plain);
+                return -1;
+            }
+            struct range columns = {
+                .start = col,
+                .end   = col + plain_len,
+            };
+            size_t abs_start     = (size_t)(text_start - buf);
+            size_t abs_end       = (size_t)(text_end - buf);
+            struct range indices = {
+                .start = abs_start - row_offset,
+                .end   = abs_end - row_offset,
+            };
+            if (record_span_(res, link_start, link_len, plain_data, plain_len,
+                             row, row_offset, columns, indices,
+                             LINKS_KIND_OSC8) == -1) {
+                strbuf_free(&plain);
+                return -1;
+            }
+            strbuf_free(&plain);
+            col = columns.end;
+            i   = abs_end + closing_len;
             continue;
         }
-
-        pos.col++;
+        col++;
         i++;
     }
 
@@ -321,15 +431,29 @@ parse_links(const struct offscr_view *view, enum link_kind kind,
     if (out->count == 0)
         out->index = 0;
 
+    size_t *row_offsets = NULL;
+    size_t row_count    = 0;
+    if (build_row_offsets_(view->data, view->len, &row_offsets, &row_count) ==
+        -1)
+        return -1;
+
+    int rc = 0;
     switch (kind) {
         case LINKS_KIND_OSC8:
-            return parse_links_osc8(view->data, view->len, out);
+            rc = parse_links_osc8(view->data, view->len, row_offsets, row_count,
+                                  out);
+            break;
         case LINKS_KIND_MAN:
-            return parse_links_man(view->data, view->len, out);
+            rc = parse_links_man(view->data, view->len, row_offsets, row_count,
+                                 out);
+            break;
         default:
-            /* Not implemented yet. */
-            return 0;
+            rc = 0;
+            break;
     }
+
+    free(row_offsets);
+    return rc;
 }
 
 void

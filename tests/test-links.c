@@ -7,6 +7,33 @@
 #include <string.h>
 
 static void
+test_link_offsets(void)
+{
+    const char sample[] =
+        "\x1b]8;;https://example.com\x1b\\Link\x1b]8;;\x1b\\\n";
+    struct offscr_view view = {
+        .data      = sample,
+        .len       = strlen(sample),
+        .truncated = 0,
+    };
+    struct link_iter iter = {0};
+    assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
+    assert(iter.count == 1);
+    const struct link_span *span = links_get(&iter, 0);
+    assert(span != NULL);
+    const char *text = strstr(sample, "Link");
+    assert(text != NULL);
+    size_t text_offset = (size_t)(text - sample);
+    assert(span->row == 0);
+    assert(span->row_offset == 0);
+    assert(span->indices.start == text_offset);
+    assert(span->indices.end == text_offset + strlen("Link"));
+    assert(span->columns.start == 0);
+    assert(span->columns.end == strlen("Link"));
+    link_iter_free(&iter);
+}
+
+static void
 test_parse_simple_snapshot(void)
 {
     struct offscr_view view = {
@@ -41,14 +68,15 @@ test_parse_positions(void)
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
     assert(iter.count == 2);
 
-    assert(iter.spans[0].start.row == 0);
-    assert(iter.spans[0].start.col == 0);
-    assert(iter.spans[0].end.row == 0);
-    assert(iter.spans[0].end.col == strlen("First"));
+    assert(iter.spans[0].row == 0);
+    assert(iter.spans[0].columns.start == 0);
+    assert(iter.spans[0].columns.end == strlen("First"));
     assert(iter.spans[0].kind == LINKS_KIND_OSC8);
 
-    assert(iter.spans[1].start.row == 1);
-    assert(iter.spans[1].start.col == strlen("Next line"));
+    assert(iter.spans[1].row == 1);
+    assert(iter.spans[1].columns.start == strlen("Next line"));
+    assert(iter.spans[1].columns.end ==
+           strlen("Next line") + strlen("Second"));
     assert(iter.spans[1].kind == LINKS_KIND_OSC8);
     link_iter_free(&iter);
 }
@@ -140,6 +168,7 @@ main(void)
     test_iter_match_and_next();
     test_parse_multiple_modes();
     test_colored_man_token();
+    test_link_offsets();
     puts("links tests OK");
     return 0;
 }

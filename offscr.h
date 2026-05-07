@@ -74,6 +74,13 @@ void offscr_reset(struct offscr_ctx *);
 struct offscr_view offscr_view(const struct offscr_ctx *);
 
 /*
+ * Return a string containing the visible characters of `row` from `view`.
+ * Escapes such as CSI/OSC are preserved, but cursor-movement sequences are
+ * skipped when the view’s columns are tracked.
+ */
+char *offscr_extract(const struct offscr_view *, size_t row);
+
+/*
  * Release storage associated with the context, invalidating any extant views.
  */
 void offscr_free(struct offscr_ctx *);

@@ -1,6 +1,7 @@
 #ifndef LINKS_H
 #define LINKS_H
 
+#include "defs.h"
 #include "offscr.h"
 
 #include <stddef.h>
@@ -10,17 +11,28 @@ enum link_kind {
     LINKS_KIND_MAN  = 1,
 };
 
-struct link_pos {
-    size_t row;
-    size_t col;
-};
 
+/*
+ * Metadata describing one detected link.
+ *
+ * link/text/text_len: canonical target URI, printable label, and its byte len.
+ * row: zero-based row number in the captured view.
+ * row_offset: absolute byte offset (within view->data) of the first byte that
+ *             belongs to row `row`. Adding indices.* to this yields absolute
+ *             byte offsets for the span.
+ * columns: visible column range [start, end) covered by the link text.
+ * indices: byte range [start, end) relative to row_offset that covers the raw
+ *          bytes forming the link text (including any inline SGR sequences).
+ * kind: which parser produced the span (OSC8 vs MAN token).
+ */
 struct link_span {
     char *link;
     char *text;
     size_t text_len;
-    struct link_pos start;
-    struct link_pos end;
+    size_t row;
+    size_t row_offset;
+    struct range columns;
+    struct range indices;
     enum link_kind kind;
 };
 

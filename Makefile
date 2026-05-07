@@ -1,29 +1,29 @@
 .POSIX:
 
-TARGETS=	mess
+TARGETS=	mess simpler
 MANPAGE=	mess.1
 VERSION_HDR=	version.h
 
-MESS_SRCS=	main.c dispatcher.c pager.c nav.c offscr.c readq.c uri.c
-MESS_HDRS=	dispatcher.h pager.h nav.h offscr.h readq.h uri.h
+MESS_SRCS=	main.c dispatcher.c pager.c nav.c offscr.c readq.c uri.c \
+		links.c styler.c strbuf.c log.c
+MESS_HDRS=	dispatcher.h pager.h nav.h offscr.h readq.h uri.h strbuf.h
 
-TESTS_SRC=	tests/test-nav.c \
-		tests/test-parser.c \
-		tests/test-reader.c \
+TESTS_SRC=	tests/test-reader.c \
 		tests/test-uri.c \
-		tests/test-offs.c \
-		tests/test-nav-session.c \
-		tests/test-links.c
-
-TESTS_BIN=	tests/test-nav.bin \
-		tests/test-parser.bin \
-		tests/test-reader.bin \
+		tests/tes-offscr.c \
+		tests/test-styler.c \
+		tests/test-links.c \
+		tests/test-strbuf.c
+TESTS_BIN=	tests/test-reader.bin \
 		tests/test-uri.bin \
-		tests/test-offs.bin \
-		tests/test-nav-session.bin \
-		tests/test-links.bin
+		tests/tes-offscr.bin \
+		tests/test-styler.bin \
+		tests/test-links.bin \
+		tests/test-strbuf.bin
 
-CFLAGS=		-O2 -g
+CC=		cc
+#CFLAGS=		-O2 -g
+CFLAGS=		-O0 -g3
 CFLAGS+= 	-I. -std=c11 -Wall -Wextra -Werror
 
 OS=		$(shell uname -s)
@@ -46,11 +46,12 @@ INSTALL=	install
 all: $(TARGETS) $(TESTS_BIN) $(MANPAGE)
 
 clean:
-	rm -rf $(TARGETS) $(TESTS_BIN) $(VERSION_HDR) $(MANPAGE)
+	rm -rf $(TARGETS) $(TESTS_BIN) styler.o strbuf.o $(VERSION_HDR) $(MANPAGE)
 	rm -rf *.dSYM tests/*.dSYM tests/integration/*.dSYM
 	rm -rf *.gcno tests/*.gcno tests/integration/*.gcno
 	rm -rf *.gcda tests/*.gcda tests/integration/*.gcda
 	rm -rf *.gcov tests/*.gcov tests/integration/*.gcov
+	${MAKE} -C tests/runner clean
 
 version.h: version.h.in
 	./versionize.sh version.h.in > $@
@@ -61,6 +62,8 @@ mess.1: mess.1.in
 mess: $(MESS_SRCS) version.h
 	$(CC) $(CFLAGS) -o $@ $(MESS_SRCS) $(LDLIBS)
 
+simpler: simpler.o nav.o links.o offscr.o styler.o strbuf.o readq.o log.o | version.h
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 test: $(TARGETS) $(TESTS_BIN)
 	@set -e; \
@@ -75,6 +78,7 @@ test: $(TARGETS) $(TESTS_BIN)
 	@for f in tests/dispatcher/*.c; do \
 		tikl -v -c tests/dispatcher/tikl.conf $$f; \
 	done
+	${MAKE} -C tests/runner all test
 
 coverage:
 	@$(MAKE) clean
@@ -94,10 +98,19 @@ install: mess $(MANPAGE)
 	$(INSTALL) -d "$(DESTDIR)$(MANDIR)/man1"
 	$(INSTALL) -m 644 $(MANPAGE) "$(DESTDIR)$(MANDIR)/man1/mess.1"
 
-tests/test-links.bin: tests/test-links.c links.c
+tests/test-links.bin: tests/test-links.c links.c strbuf.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-tests/test-%.bin: tests/test-%.c nav.c links.c offscr.c readq.c uri.c
+tests/tes-offscr.bin: tests/tes-offscr.c links.c offscr.c readq.c uri.c strbuf.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test-styler.bin: tests/test-styler.c styler.o strbuf.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test-strbuf.bin: tests/test-strbuf.c strbuf.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+tests/test-%.bin: tests/test-%.c links.c offscr.c readq.c uri.c strbuf.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 format:

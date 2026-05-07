@@ -12,9 +12,6 @@ DEPS.run_offscr=	${ROOTDIR}/offscr.o
 TARGETS+=		run_links.bin
 DEPS.run_links=		${ROOTDIR}/links.o ${ROOTDIR}/offscr.o
 
-TARGETS+=		run_nav.bin
-DEPS.run_nav=		${ROOTDIR}/nav.o ${ROOTDIR}/links.o ${ROOTDIR}/offscr.o
-
 all: ${TARGETS}
 
 clean:
