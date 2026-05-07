@@ -1,5 +1,6 @@
 #include "links.h"
 
+#include "ansi.h"
 #include "strbuf.h"
 
 #include <ctype.h>
@@ -98,9 +99,17 @@ record_span_(struct link_iter *res, const char *link_begin, size_t link_len,
     return 0;
 }
 
-static int man_is_name_char_(char ch);
-static int man_is_section_char_(char ch);
-static int man_name_all_upper_(const char *name, size_t len);
+struct cursor_pos {
+    size_t row;
+    size_t col;
+    size_t row_offset;
+};
+
+struct osc8_seq {
+    const char *uri;
+    size_t uri_len;
+    size_t end;
+};
 
 static int
 man_is_name_char_(char ch)
@@ -166,35 +175,7 @@ strip_decorations_(const char *data, size_t len, struct strbuf *dest,
             continue;
         }
         if (ch == '\033') {
-            size_t seq_end = i + 1;
-            if (seq_end < len) {
-                unsigned char next = (unsigned char)data[seq_end];
-                if (next == '[') {
-                    seq_end++;
-                    while (seq_end < len) {
-                        unsigned char c = (unsigned char)data[seq_end++];
-                        if (c >= '@' && c <= '~')
-                            break;
-                    }
-                } else if (next == ']') {
-                    seq_end++;
-                    while (seq_end < len) {
-                        unsigned char cur = (unsigned char)data[seq_end++];
-                        if (cur == '\a')
-                            break;
-                        if (cur == '\033' && seq_end < len &&
-                            (unsigned char)data[seq_end] == '\\') {
-                            seq_end++;
-                            break;
-                        }
-                    }
-                } else {
-                    seq_end++;
-                }
-            }
-            if (seq_end > len)
-                seq_end = len;
-            i = seq_end;
+            i = ansi_skip_seq(data, len, i);
             continue;
         }
         if (strbuf_push(dest, (char)ch) != 0)
@@ -291,6 +272,60 @@ row_offset_for_(const size_t *offsets, size_t count, size_t row)
     return offsets[count - 1];
 }
 
+static void
+cursor_advance_byte_(struct cursor_pos *pos, unsigned char ch, size_t next_idx)
+{
+    if (!pos)
+        return;
+    if (ch == '\n') {
+        pos->row++;
+        pos->col        = 0;
+        pos->row_offset = next_idx;
+    } else if (ch == '\r') {
+        pos->col = 0;
+    } else if (ch == '\b') {
+        if (pos->col > 0)
+            pos->col--;
+    } else {
+        pos->col++;
+    }
+}
+
+static int
+parse_osc8_seq_(const char *buf, size_t len, size_t idx, struct osc8_seq *out)
+{
+    if (!buf || !out || idx >= len || buf[idx] != '\033')
+        return 0;
+
+    struct ansi_seq seq = ansi_parse_seq(buf, len, idx);
+    if (seq.type != ANSI_SEQ_OSC || !seq.complete)
+        return 0;
+
+    size_t payload_start = idx + 2;
+    if (payload_start >= seq.end || buf[payload_start] != '8')
+        return 0;
+
+    const char *payload = buf + payload_start + 1;
+    const char *end     = buf + seq.end;
+    if (end >= buf + 2 && end[-1] == '\\' && end[-2] == '\033')
+        end -= 2;
+    else if (end > payload && end[-1] == '\a')
+        end -= 1;
+
+    const char *first_semicolon = memchr(payload, ';', (size_t)(end - payload));
+    if (!first_semicolon)
+        return 0;
+    const char *second_semicolon =
+        memchr(first_semicolon + 1, ';', (size_t)(end - (first_semicolon + 1)));
+    if (!second_semicolon)
+        return 0;
+
+    out->uri     = second_semicolon + 1;
+    out->uri_len = (size_t)(end - out->uri);
+    out->end     = seq.end;
+    return 1;
+}
+
 static int
 parse_links_man(const char *buf, size_t len, const size_t *row_offsets,
                 size_t row_count, struct link_iter *res)
@@ -381,70 +416,51 @@ parse_links_man(const char *buf, size_t len, const size_t *row_offsets,
 }
 
 static int
-parse_links_osc8(const char *buf, size_t len, const size_t *row_offsets,
-                 size_t row_count, struct link_iter *res)
+parse_links_osc8(const char *buf, size_t len, struct link_iter *res)
 {
-    (void)row_offsets;
-    (void)row_count;
-
-    size_t row               = 0;
-    size_t col               = 0;
-    size_t row_offset        = 0;
-    size_t i                 = 0;
-    const char closing_seq[] = "\033]8;;\033\\";
-    const size_t closing_len = sizeof(closing_seq) - 1;
+    struct cursor_pos pos = {0};
+    size_t i             = 0;
 
     while (i < len) {
         unsigned char ch = (unsigned char)buf[i];
-        if (ch == '\n') {
-            row++;
-            col = 0;
-            i++;
-            row_offset = i;
-            continue;
-        }
-        if (ch == '\r') {
-            col = 0;
-            i++;
-            continue;
-        }
-        if (ch == '\b') {
-            if (col > 0)
-                col--;
-            i++;
-            continue;
-        }
-        if (ch == '\033' && i + 4 < len && buf[i + 1] == ']' &&
-            buf[i + 2] == '8') {
-            const char *start           = buf + i;
-            const char *cursor          = start + 3;
-            const char *end             = buf + len;
-            const char *first_semicolon = memchr(cursor, ';', end - cursor);
-            if (first_semicolon == NULL)
-                break;
-            const char *second_semicolon =
-                memchr(first_semicolon + 1, ';', end - (first_semicolon + 1));
-            if (second_semicolon == NULL)
-                break;
-            const char *link_start = second_semicolon + 1;
-            const char *link_end   = strstr(link_start, "\033\\");
-            if (link_end == NULL)
-                break;
-            const char *text_start = link_end + 2;
-            const char *text_end   = strstr(text_start, closing_seq);
-            if (text_end == NULL)
-                break;
-
-            size_t link_len  = (size_t)(link_end - link_start);
-            size_t text_span = (size_t)(text_end - text_start);
-            if (link_len == 0) {
-                i = (size_t)((link_end + 2) - buf);
+        if (ch == '\033') {
+            struct osc8_seq open = {0};
+            if (!parse_osc8_seq_(buf, len, i, &open)) {
+                i = ansi_skip_seq(buf, len, i);
                 continue;
             }
+            if (open.uri_len == 0) {
+                i = open.end;
+                continue;
+            }
+
+            size_t text_start = open.end;
+            struct cursor_pos text_pos = pos;
+            size_t scan = text_start;
+            struct osc8_seq close = {0};
+            bool found_close = false;
+            while (scan < len) {
+                unsigned char text_ch = (unsigned char)buf[scan];
+                if (text_ch == '\033' &&
+                    parse_osc8_seq_(buf, len, scan, &close) &&
+                    close.uri_len == 0) {
+                    found_close = true;
+                    break;
+                }
+                if (text_ch == '\033') {
+                    scan = ansi_skip_seq(buf, len, scan);
+                    continue;
+                }
+                cursor_advance_byte_(&text_pos, text_ch, scan + 1);
+                scan++;
+            }
+            if (!found_close)
+                break;
+
             struct strbuf plain = STRBUF_INIT;
             size_t plain_len    = 0;
-            if (strip_decorations_(text_start, text_span, &plain, NULL,
-                                   &plain_len) == -1) {
+            if (strip_decorations_(buf + text_start, scan - text_start, &plain,
+                                   NULL, &plain_len) == -1) {
                 strbuf_free(&plain);
                 return -1;
             }
@@ -454,27 +470,25 @@ parse_links_osc8(const char *buf, size_t len, const size_t *row_offsets,
                 return -1;
             }
             struct range columns = {
-                .start = col,
-                .end   = col + plain_len,
+                .start = pos.col,
+                .end   = pos.col + plain_len,
             };
-            size_t abs_start     = (size_t)(text_start - buf);
-            size_t abs_end       = (size_t)(text_end - buf);
             struct range indices = {
-                .start = abs_start - row_offset,
-                .end   = abs_end - row_offset,
+                .start = text_start - pos.row_offset,
+                .end   = scan - pos.row_offset,
             };
-            if (record_span_(res, link_start, link_len, plain_data, plain_len,
-                             row, row_offset, columns, indices,
+            if (record_span_(res, open.uri, open.uri_len, plain_data, plain_len,
+                             pos.row, pos.row_offset, columns, indices,
                              LINKS_KIND_OSC8) == -1) {
                 strbuf_free(&plain);
                 return -1;
             }
             strbuf_free(&plain);
-            col = columns.end;
-            i   = abs_end + closing_len;
+            pos = text_pos;
+            i   = close.end;
             continue;
         }
-        col++;
+        cursor_advance_byte_(&pos, ch, i + 1);
         i++;
     }
 
@@ -494,22 +508,22 @@ parse_links(const struct offscr_view *view, enum link_kind kind,
     if (out->count == 0)
         out->index = 0;
 
-    size_t *row_offsets = NULL;
-    size_t row_count    = 0;
-    if (build_row_offsets_(view->data, view->len, &row_offsets, &row_count) ==
-        -1)
-        return -1;
-
     int rc = 0;
     switch (kind) {
         case LINKS_KIND_OSC8:
-            rc = parse_links_osc8(view->data, view->len, row_offsets, row_count,
-                                  out);
+            rc = parse_links_osc8(view->data, view->len, out);
             break;
-        case LINKS_KIND_MAN:
+        case LINKS_KIND_MAN: {
+            size_t *row_offsets = NULL;
+            size_t row_count    = 0;
+            if (build_row_offsets_(view->data, view->len, &row_offsets,
+                                   &row_count) == -1)
+                return -1;
             rc = parse_links_man(view->data, view->len, row_offsets, row_count,
                                  out);
+            free(row_offsets);
             break;
+        }
         default:
             rc = 0;
             break;
@@ -518,7 +532,6 @@ parse_links(const struct offscr_view *view, enum link_kind kind,
     if (rc == 0)
         sort_spans_(out);
 
-    free(row_offsets);
     return rc;
 }
 

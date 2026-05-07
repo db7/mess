@@ -5,7 +5,6 @@
 #include <string.h>
 #include <unistd.h>
 
-// Initialize the queue descriptor used for PTY reads.
 void
 readq_init(struct readq *queue, int fd)
 {
@@ -16,8 +15,6 @@ readq_init(struct readq *queue, int fd)
     queue->fd         = fd;
 }
 
-// Refill the buffer from the file descriptor
-// Return true if more data is available
 bool
 readq_refill(struct readq *queue)
 {
@@ -26,10 +23,8 @@ readq_refill(struct readq *queue)
     assert(nread >= 0);
 
     if (queue->start > 0) {
-        // Move unread data to the beginning of the buffer
         memmove(queue->buffer, queue->buffer + queue->start, nread);
 
-        // Update buffer pointers
         queue->start              = 0;
         queue->end                = nread;
         queue->buffer[queue->end] = '\0';
@@ -40,7 +35,6 @@ readq_refill(struct readq *queue)
     if (nread == capacity)
         return false;
 
-    // Read new data into the remaining space in the buffer
     nread = read(queue->fd, queue->buffer + queue->end, capacity - nread);
     if (nread <= 0)
         return false;
@@ -52,21 +46,16 @@ readq_refill(struct readq *queue)
     return true;
 }
 
-// Get the current byte from the buffer
-// Returns -1 if no more data is available and the buffer can't be refilled
 int
 readq_pick_byte(struct readq *queue)
 {
     if (queue->start >= queue->end) {
-        return -1; // No more data available
+        return -1;
     }
 
-    // Return the next byte and advance the start index
     return queue->buffer[queue->start];
 }
 
-// Get the next byte from the buffer
-// Returns -1 if no more data is available and the buffer can't be refilled
 int
 readq_get_next(struct readq *queue)
 {
@@ -76,11 +65,9 @@ readq_get_next(struct readq *queue)
     return b;
 }
 
-// Check if the queue is empty and cannot be refilled
 bool
 readq_is_empty(struct readq *queue)
 {
-    // If no unread data and refill fails, the queue is empty
     return readq_pick_byte(queue) == -1;
 }
 

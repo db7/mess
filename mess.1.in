@@ -4,11 +4,11 @@
 mess \- wrap a pager and navigate OSC8 links
 .SH SYNOPSIS
 .B mess
-.RI [ pager-args ]
+.RI [ file | uri ]
 .br
 .B mess
 .B -m
-.RI [ pager-args ]
+.RI < input
 .br
 .B mess
 .B --open
@@ -24,11 +24,10 @@ Linux. It relies on common utilities including
 .BR lynx (1),
 and
 .BR lowdown (1)
-as helpers. All command line arguments other than
-.B --open
-and
-.B --help
-are forwarded to the pager unchanged.
+as helpers. When invoked with one positional argument,
+.B mess
+dispatches it as a file or URI; without a target, it reads stdin and wraps the
+downstream pager.
 .PP
 When the pager emits OSC8 hyperlinks,
 .B mess
@@ -40,7 +39,9 @@ normal pager input. Any other key is passed straight to the pager.
 If the first non option argument names a Markdown file,
 .B mess
 executes
-.BR lowdown (1)
+.B MESS_MDRENDER
+or
+.BR mdcat (1)
 to render the document to the terminal and pipes the generated stream into
 the pager so that hyperlinks stay active. Supplying a
 .I file://
@@ -153,16 +154,13 @@ Open the highlighted link using the configured launcher (see
 under
 .BR ENVIRONMENT ).
 .TP
-.B Shift-Tab
-Cycle backwards through the discovered links.
-.TP
 .B h / j / k / l
 Move spatially between links: left, down, up, and right. Vertical movement
 prefers links whose column range overlaps the current selection, then falls
 back to the nearest column. Horizontal movement falls through to the previous
 or next row when there is no link left or right of the current selection.
 .TP
-.B v
+.B e
 Open the document referenced by the
 .B MESSFILE
 environment variable in the editor configured via
@@ -179,22 +177,6 @@ before spawning the pager; wrapper mode (`... | mess`) can export it manually
 so the shortcut knows which path to edit. The selected link's captured
 display row is passed as a `+line` editor argument when available.
 .TP
-.B c
-Toggle inline link coloring, assigning a distinct ANSI color to each stored
-link so OSC8 targets and manual cross references stand out while browsing.
-.TP
-.B x
-Toggle the one second capture freeze. When enabled (the default) `mess` asks the
-pager for a refresh the first time you hit Tab, captures the resulting redraw
-for one second, and then freezes the terminal so the highlighted links stay
-stable; a `messF` indicator appears on the top right while navigation is active,
-and a trailing `!` warns when more pager output arrived but was suppressed by
-the freeze.
-.TP
-.B D
-Toggle a debugging overlay that lists every stored link and its target, useful
-when validating OSC8 output or manual cross references.
-.TP
 .B Escape
 Clear the selection and resume normal pager input.
 .TP
@@ -207,12 +189,7 @@ The selection persists until cleared explicitly or a new buffer is viewed.
 .SH ENVIRONMENT
 .TP
 .B PAGER
-Overrides the pager command. When the first word is
-.BR less ,
-.B mess
-automatically appends
-.B -r
-unless a raw output flag is already present.
+Overrides the downstream pager command.
 .B MESSPAGER
 is consulted before
 .B PAGER
@@ -243,7 +220,7 @@ different pager wrapper in that scenario.
 .TP
 .BR VISUAL ", " EDITOR
 Command invoked when pressing
-.B v
+.B e
 during navigation. The value is expanded via
 .BR wordexp (3)
 before appending a `+line` argument and the current document path. The line is
@@ -255,7 +232,7 @@ when neither variable is set.
 .B MESSFILE
 Absolute or relative path to the document currently shown in the pager. The
 dispatcher mode (`mess <file|uri>`) sets this automatically so the
-.B v
+.B e
 shortcut knows what to edit. When feeding the pager via stdin you can export
 .B MESSFILE
 ahead of time to give navigation mode the same context.
@@ -270,14 +247,9 @@ status line.
 .B MESS_MDRENDER
 Markdown renderer to apply before piping the output into the pager when opening
 `.md` files directly. The default command is
-.BR "lowdown -tterm --term-no-links" .
+.BR mdcat .
 Point this variable at another converter (for example `pandoc -t plain`) to
 customize the preview.
-.TP
-.B MESS_DEBUG_STATUS
-Optional path that enables logging of every status-line update emitted by
-navigation mode. Helpful when debugging terminal control sequences; unset by
-default so no extra files are created.
 .SH EXIT STATUS
 .B mess
 exits 0 when the pager and any helper processes finish successfully.

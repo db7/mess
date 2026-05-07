@@ -17,28 +17,26 @@
 #include <unistd.h>
 #include <wordexp.h>
 
-static int set_messfile_env_(const char *path);
+static int set_file_env_(const char *path);
 static int run_man_file_(const char *path);
 static int run_man_topic_(const char *name, const char *section);
-static int run_markdown_file_(const char *path);
-static int run_pager_file_(const char *path);
-static int run_browser_(const char *link);
+static int run_md_(const char *path);
+static int run_file_(const char *path);
+static int run_uri_(const char *link);
 static int run_simple_(char *const argv[]);
-static int run_simple_with_stdin_(char *const argv[], int fd);
-static int build_command_from_env_(const char *env, const char *fallback,
-                                   wordexp_t *we);
-static int wait_for_child_(pid_t pid);
-static const char *default_pager_(void);
-static const char *default_browser_(void);
-static const char *default_markdown_renderer_(void);
+static int run_stdin_(char *const argv[], int fd);
+static int build_cmd_(const char *env, const char *fallback, wordexp_t *we);
+static int wait_child_(pid_t pid);
+static const char *self_(void);
+static const char *browser_(void);
+static const char *md_(void);
 bool dispatcher_command_is_self(const char *cmd);
-static void ensure_manpager_(void);
-static char *shell_quote_(const char *text);
-static void set_mess_uri_env_(const char *uri);
+static void set_manpager_(void);
+static char *quote_sh_(const char *text);
+static void set_uri_env_(const char *uri);
+static bool find_self_(const char *name);
 
-// Absolute path to the running mess binary when known.
 static char self_path_[PATH_MAX];
-// Flag noting whether self_path_ currently contains a valid path.
 static bool have_self_path_;
 
 int
@@ -57,41 +55,85 @@ dispatcher_run(const char *target)
     }
 
     if (uri_is_path(&info)) {
-        if (set_messfile_env_(info.path) != 0)
+        if (set_file_env_(info.path) != 0)
             return -1;
     } else {
-        set_mess_uri_env_(info.raw);
+        set_uri_env_(info.raw);
     }
 
     switch (info.type) {
         case URI_KIND_BROWSER:
-            return run_browser_(info.raw);
+            return run_uri_(info.raw);
         case URI_KIND_MAN_TOPIC:
             return run_man_topic_(info.man.name, info.man.section);
         case URI_KIND_MARKDOWN_FILE:
-            return run_markdown_file_(info.path);
+            return run_md_(info.path);
         case URI_KIND_MAN_FILE:
             return run_man_file_(info.path);
         case URI_KIND_FILE:
         default:
-            return run_pager_file_(info.path);
+            return run_file_(info.path);
     }
 }
 
 void
 dispatcher_set_self_path(const char *path)
 {
-    if (!path)
+    have_self_path_ = false;
+    self_path_[0]   = '\0';
+
+    if (!path || !path[0])
         return;
-    if (strlen(path) >= sizeof(self_path_))
+
+    char resolved[PATH_MAX];
+    if (strchr(path, '/')) {
+        if (realpath(path, resolved)) {
+            snprintf(self_path_, sizeof(self_path_), "%s", resolved);
+            have_self_path_ = true;
+        }
         return;
-    strcpy(self_path_, path);
-    have_self_path_ = true;
+    }
+
+    (void)find_self_(path);
 }
 
-// Export the MESSFILE environment variable so child processes know the source.
+static bool
+find_self_(const char *name)
+{
+    const char *path_env = getenv("PATH");
+    if (!name || !*name || !path_env)
+        return false;
+
+    const char *entry = path_env;
+    while (true) {
+        const char *colon = strchr(entry, ':');
+        size_t dir_len    = colon ? (size_t)(colon - entry) : strlen(entry);
+        const char *dir   = dir_len == 0 ? "." : entry;
+        size_t actual_len = dir_len == 0 ? 1 : dir_len;
+
+        char candidate[PATH_MAX];
+        int written = snprintf(candidate, sizeof(candidate), "%.*s/%s",
+                               (int)actual_len, dir, name);
+        if (written > 0 && (size_t)written < sizeof(candidate) &&
+            access(candidate, X_OK) == 0) {
+            char resolved[PATH_MAX];
+            if (realpath(candidate, resolved)) {
+                snprintf(self_path_, sizeof(self_path_), "%s", resolved);
+                have_self_path_ = true;
+                return true;
+            }
+        }
+
+        if (!colon)
+            break;
+        entry = colon + 1;
+    }
+
+    return false;
+}
+
 static int
-set_messfile_env_(const char *path)
+set_file_env_(const char *path)
 {
     if (setenv("MESSFILE", path, 1) == -1) {
         perror("setenv MESSFILE");
@@ -101,7 +143,7 @@ set_messfile_env_(const char *path)
 }
 
 static void
-set_mess_uri_env_(const char *uri)
+set_uri_env_(const char *uri)
 {
     if (!uri || !uri[0])
         return;
@@ -109,26 +151,14 @@ set_mess_uri_env_(const char *uri)
         perror("setenv MESS_URI");
 }
 
-// Derive the mess wrapper command used for file targets.
 static const char *
-default_pager_(void)
+self_(void)
 {
-    static char fallback[PATH_MAX * 2];
-    if (!fallback[0] && have_self_path_) {
-        char *quoted = shell_quote_(self_path_);
-        if (quoted) {
-            (void)snprintf(fallback, sizeof(fallback), "%s -m -o", quoted);
-            free(quoted);
-        }
-    }
-    if (fallback[0])
-        return fallback;
-    return "mess -m -o";
+    return have_self_path_ ? self_path_ : "mess";
 }
 
-// Pick a browser launcher suitable for the current platform.
 static const char *
-default_browser_(void)
+browser_(void)
 {
 #ifdef __APPLE__
     return "open";
@@ -137,14 +167,12 @@ default_browser_(void)
 #endif
 }
 
-// Provide a default Markdown renderer when the user has not configured one.
 static const char *
-default_markdown_renderer_(void)
+md_(void)
 {
     return "mdcat";
 }
 
-// Test whether the configured pager command resolves back to mess itself.
 bool
 dispatcher_command_is_self(const char *cmd)
 {
@@ -155,6 +183,17 @@ dispatcher_command_is_self(const char *cmd)
     if (!*cmd)
         return false;
     size_t len = strcspn(cmd, " \t");
+    if (memchr(cmd, '/', len)) {
+        char first[PATH_MAX];
+        if (len >= sizeof(first))
+            return false;
+        memcpy(first, cmd, len);
+        first[len] = '\0';
+        char resolved[PATH_MAX];
+        if (have_self_path_ && realpath(first, resolved) &&
+            strcmp(resolved, self_path_) == 0)
+            return true;
+    }
     if (have_self_path_ && strncmp(cmd, self_path_, len) == 0 &&
         self_path_[len] == '\0')
         return true;
@@ -169,10 +208,8 @@ dispatcher_self_path(void)
     return NULL;
 }
 
-
-// Tokenise the command string originating from the environment.
 static int
-build_command_from_env_(const char *env, const char *fallback, wordexp_t *we)
+build_cmd_(const char *env, const char *fallback, wordexp_t *we)
 {
     const char *candidates[3] = {NULL, NULL, NULL};
     if (env && *env)
@@ -193,14 +230,12 @@ build_command_from_env_(const char *env, const char *fallback, wordexp_t *we)
     return -1;
 }
 
-// Run a Markdown renderer and pipe its output into the configured pager.
 static int
-run_markdown_file_(const char *path)
+run_md_(const char *path)
 {
     const char *renderer_env = getenv("MESS_MDRENDER");
     wordexp_t render_we;
-    if (build_command_from_env_(renderer_env, default_markdown_renderer_(),
-                                &render_we) != 0)
+    if (build_cmd_(renderer_env, md_(), &render_we) != 0)
         return -1;
     char **renderer_argv = calloc(render_we.we_wordc + 2, sizeof(char *));
     if (!renderer_argv) {
@@ -212,18 +247,11 @@ run_markdown_file_(const char *path)
     renderer_argv[render_we.we_wordc]     = (char *)path;
     renderer_argv[render_we.we_wordc + 1] = NULL;
 
-    wordexp_t we;
-    if (build_command_from_env_(NULL, default_pager_(), &we) != 0) {
-        free(renderer_argv);
-        wordfree(&render_we);
-        return -1;
-    }
     int pipefd[2];
     if (pipe(pipefd) == -1) {
         perror("pipe");
         free(renderer_argv);
         wordfree(&render_we);
-        wordfree(&we);
         return -1;
     }
 
@@ -232,7 +260,6 @@ run_markdown_file_(const char *path)
         perror("fork");
         free(renderer_argv);
         wordfree(&render_we);
-        wordfree(&we);
         close(pipefd[0]);
         close(pipefd[1]);
         return -1;
@@ -254,21 +281,15 @@ run_markdown_file_(const char *path)
         close(pipefd[1]);
         free(renderer_argv);
         wordfree(&render_we);
-        wordfree(&we);
-        wait_for_child_(renderer);
+        wait_child_(renderer);
         return -1;
     }
     if (pager == 0) {
         dup2(pipefd[0], STDIN_FILENO);
         close(pipefd[0]);
         close(pipefd[1]);
-        char **argv = calloc(we.we_wordc + 1, sizeof(char *));
-        if (!argv)
-            _exit(127);
-        for (size_t i = 0; i < we.we_wordc; ++i)
-            argv[i] = we.we_wordv[i];
-        argv[we.we_wordc] = NULL;
-        execvp(argv[0], argv);
+        const char *binary = self_();
+        execlp(binary, binary, "-m", "-o", (char *)NULL);
         perror("pager");
         _exit(127);
     }
@@ -277,49 +298,37 @@ run_markdown_file_(const char *path)
     close(pipefd[1]);
     free(renderer_argv);
     wordfree(&render_we);
-    wordfree(&we);
-    int rc1 = wait_for_child_(renderer);
-    int rc2 = wait_for_child_(pager);
+    int rc1 = wait_child_(renderer);
+    int rc2 = wait_child_(pager);
     return (rc1 == 0) ? rc2 : rc1;
 }
 
-// Invoke the pager on a regular file target.
 static int
-run_pager_file_(const char *path)
+run_file_(const char *path)
 {
-    wordexp_t we;
-    if (build_command_from_env_(NULL, default_pager_(), &we) != 0)
-        return -1;
-    char **argv = calloc(we.we_wordc + 1, sizeof(char *));
-    if (!argv) {
-        wordfree(&we);
-        return -1;
-    }
-    for (size_t i = 0; i < we.we_wordc; ++i)
-        argv[i] = we.we_wordv[i];
     int rc            = 0;
-    argv[we.we_wordc] = NULL;
     int fd            = open(path, O_RDONLY);
     if (fd == -1) {
         perror(path);
         rc = -1;
     } else {
-        rc = run_simple_with_stdin_(argv, fd);
+        char *const argv[] = {
+            (char *)self_(),
+            (char *)"-m",
+            (char *)"-o",
+            NULL,
+        };
+        rc = run_stdin_(argv, fd);
     }
-    free(argv);
-    wordfree(&we);
     return rc;
 }
 
-// Launch the system man(1) command with a local file path.
 static int
 run_man_file_(const char *path)
 {
-    ensure_manpager_();
+    set_manpager_();
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) ||       \
     defined(__OpenBSD__) || defined(__DragonFly__)
-    // Some BSD-derived man implementations treat paths as ordinary operands
-    // and do not support -l.
     char *const argv[] = {(char *)"man", (char *)path, NULL};
 #else
     char *const argv[] = {(char *)"man", (char *)"-l", (char *)path, NULL};
@@ -327,24 +336,22 @@ run_man_file_(const char *path)
     return run_simple_(argv);
 }
 
-// Launch the system man(1) command with a topic and section.
 static int
 run_man_topic_(const char *name, const char *section)
 {
     if (!name || !section)
         return -1;
-    ensure_manpager_();
+    set_manpager_();
     char *const argv[] = {(char *)"man", (char *)section, (char *)name, NULL};
     return run_simple_(argv);
 }
 
-// Spawn the configured browser to open an external link.
 static int
-run_browser_(const char *link)
+run_uri_(const char *link)
 {
     const char *browser_env = getenv("BROWSER");
     wordexp_t we;
-    if (build_command_from_env_(browser_env, default_browser_(), &we) != 0)
+    if (build_cmd_(browser_env, browser_(), &we) != 0)
         return -1;
     char **argv = calloc(we.we_wordc + 2, sizeof(char *));
     if (!argv) {
@@ -361,7 +368,6 @@ run_browser_(const char *link)
     return rc;
 }
 
-// Fork/exec the provided argv and propagate the exit status.
 static int
 run_simple_(char *const argv[])
 {
@@ -375,12 +381,11 @@ run_simple_(char *const argv[])
         perror(argv[0]);
         _exit(127);
     }
-    return wait_for_child_(pid);
+    return wait_child_(pid);
 }
 
-// Fork/exec the provided argv while wiring a file descriptor to stdin.
 static int
-run_simple_with_stdin_(char *const argv[], int fd)
+run_stdin_(char *const argv[], int fd)
 {
     pid_t pid = fork();
     if (pid == -1) {
@@ -399,12 +404,11 @@ run_simple_with_stdin_(char *const argv[], int fd)
         _exit(127);
     }
     close(fd);
-    return wait_for_child_(pid);
+    return wait_child_(pid);
 }
 
-// Wait for a child process and normalise its termination status.
 static int
-wait_for_child_(pid_t pid)
+wait_child_(pid_t pid)
 {
     int status = 0;
     if (waitpid(pid, &status, 0) == -1) {
@@ -418,14 +422,13 @@ wait_for_child_(pid_t pid)
     return -1;
 }
 
-// Ensure MANPAGER references mess itself when available.
 static void
-ensure_manpager_(void)
+set_manpager_(void)
 {
     if (!have_self_path_)
         return;
 
-    char *quoted = shell_quote_(self_path_);
+    char *quoted = quote_sh_(self_path_);
     if (!quoted)
         return;
 
@@ -439,9 +442,8 @@ ensure_manpager_(void)
         perror("setenv MANPAGER");
 }
 
-// Produce a safely shell-quoted version of the supplied text.
 static char *
-shell_quote_(const char *text)
+quote_sh_(const char *text)
 {
     if (!text)
         return NULL;

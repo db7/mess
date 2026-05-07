@@ -1,6 +1,3 @@
-/*
- * Simple growable string buffer used throughout mess.
- */
 #ifndef MESS_STRBUF_H
 #define MESS_STRBUF_H
 

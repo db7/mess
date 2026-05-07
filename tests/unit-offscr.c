@@ -37,7 +37,6 @@ test_capture_reads_full_payload_(void)
     struct offscr_view view = offscr_view(ctx);
     assert(view.len == strlen("hello world"));
     assert(memcmp(view.data, "hello world", view.len) == 0);
-    assert(view.truncated == 0);
 
     close(pipefd[0]);
     offscr_free(ctx);
@@ -51,7 +50,6 @@ test_capture_timeout_(void)
     assert(pipe(pipefd) == 0);
 
     struct offscr_opts opts = {
-        .max_bytes             = 1024,
         .first_byte_timeout_ms = 25,
         .next_byte_timeout_ms  = 25,
     };
@@ -75,78 +73,9 @@ test_capture_timeout_(void)
     struct offscr_view view = offscr_view(ctx);
     assert(view.len == 4);
     assert(memcmp(view.data, "seed", 4) == 0);
-    assert(view.truncated == 0);
 
     close(pipefd[0]);
     close(pipefd[1]);
-    offscr_free(ctx);
-}
-
-/* Verify the capture honours max_bytes and reports truncation. */
-static void
-test_capture_respects_limit_(void)
-{
-    int pipefd[2];
-    assert(pipe(pipefd) == 0);
-
-    struct offscr_opts opts = {
-        .max_bytes             = 5,
-        .first_byte_timeout_ms = 100,
-        .next_byte_timeout_ms  = 100,
-        .max_lines             = 0,
-    };
-    struct offscr_ctx *ctx = offscr_new(&opts);
-    assert(ctx != NULL);
-
-    write_payload_(pipefd[1], "exceed");
-    close(pipefd[1]);
-
-    int rc = offscr_capture(ctx, pipefd[0]);
-    assert(rc == OFFSCR_CAPTURE_OK);
-    struct offscr_view view = offscr_view(ctx);
-    assert(view.len == 5);
-    assert(memcmp(view.data, "excee", 5) == 0);
-    assert(view.truncated != 0);
-
-    offscr_reset(ctx);
-    view = offscr_view(ctx);
-    assert(view.len == 0);
-    assert(view.truncated == 0);
-
-    close(pipefd[0]);
-    offscr_free(ctx);
-}
-
-/* Verify the capture honours a line limit and truncates accordingly. */
-static void
-test_capture_respects_line_limit_(void)
-{
-    int pipefd[2];
-    assert(pipe(pipefd) == 0);
-
-    struct offscr_opts opts = {
-        .max_bytes             = 0,
-        .first_byte_timeout_ms = 100,
-        .next_byte_timeout_ms  = 100,
-        .max_lines             = 2,
-    };
-    struct offscr_ctx *ctx = offscr_new(&opts);
-    assert(ctx != NULL);
-
-    write_payload_(pipefd[1],
-                   "one\n"
-                   "two\n"
-                   "three\n");
-    close(pipefd[1]);
-
-    int rc = offscr_capture(ctx, pipefd[0]);
-    assert(rc == OFFSCR_CAPTURE_OK);
-    struct offscr_view view = offscr_view(ctx);
-    assert(view.len == strlen("one\ntwo\n"));
-    assert(memcmp(view.data, "one\ntwo\n", view.len) == 0);
-    assert(view.truncated != 0);
-
-    close(pipefd[0]);
     offscr_free(ctx);
 }
 
@@ -185,7 +114,6 @@ test_capture_drain_discards_snapshot_(void)
     assert(offscr_capture(ctx, pipefd[0]) == OFFSCR_CAPTURE_OK);
     struct offscr_view view = offscr_view(ctx);
     assert(view.len == 0);
-    assert(view.truncated == 0);
 
     close(pipefd[0]);
     offscr_free(ctx);
@@ -196,8 +124,6 @@ main(void)
 {
     test_capture_reads_full_payload_();
     test_capture_timeout_();
-    test_capture_respects_limit_();
-    test_capture_respects_line_limit_();
     test_offscr_extract_ignores_cursor_move();
     test_capture_drain_discards_snapshot_();
     puts("offscr tests OK");

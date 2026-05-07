@@ -1,6 +1,6 @@
 // RUN: cat %S/data/sample1.md | %x | %check
 //
-// CHECK: [osc8] [0] (3,75)-(3,79)
+// CHECK: [osc8] [0] (3,64)-(3,68)
 // CHECK-SAME: [osc8] [0] {{.*}} "OSC8"
 // CHECK-SAME: [osc8] [0] {{.*}} https://gist.github.com/egmontkob/
 //
@@ -8,9 +8,9 @@
 // CHECK-SAME: [osc8] [1] {{.*}} "sequences"
 // CHECK-SAME: [osc8] [1] {{.*}} https://gist.github.com/egmontkob/
 //
-// CHECK: [osc8] [2] (6,70)-(6,74) "lynx" -> https://lynx.browser.org/
+// CHECK: [osc8] [2] (6,48)-(6,52) "lynx" -> https://lynx.browser.org/
 //
-// CHECK: [osc8] [3] (6,80)-(6,87) "lowdown"
+// CHECK: [osc8] [3] (6,58)-(6,65) "lowdown"
 // CHECK-SAME: [osc8] [3] {{.*}} https://kristaps.bsd.lv/lowdown/
 //
 // CHECK: [man] [4] (8,34)-(8,44)
@@ -26,10 +26,8 @@ int
 main(void)
 {
     struct offscr_opts opts = {
-        .max_bytes             = 0,
         .first_byte_timeout_ms = 0,
         .next_byte_timeout_ms  = 0,
-        .max_lines             = 10,
     };
     int status = EXIT_FAILURE;
 

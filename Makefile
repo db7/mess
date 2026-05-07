@@ -17,7 +17,7 @@ INSTALL=	install
 
 SRCS=		main.c dispatcher.c pager.c \
 		nav.c offscr.c readq.c \
-		uri.c links.c styler.c \
+		uri.c links.c styler.c ansi.c \
 		strbuf.c log.c
 OBJS=		${SRCS:S/.c/.o/}
 OBJS=		${SRCS:.c=.o}
@@ -81,16 +81,16 @@ tests/unit-uri.bin:	tests/unit-uri.o uri.o
 	${CC} -o $@ tests/unit-uri.o uri.o ${LDFLAGS}
 tests/unit-readq.bin:	tests/unit-readq.o readq.o
 	${CC} -o $@ tests/unit-readq.o readq.o ${LDFLAGS}
-tests/unit-links.bin:	tests/unit-links.o links.o strbuf.o
-	${CC} -o $@ tests/unit-links.o links.o strbuf.o ${LDFLAGS}
-tests/unit-styler.bin:	tests/unit-styler.o styler.o strbuf.o
-	${CC} -o $@ tests/unit-styler.o styler.o strbuf.o ${LDFLAGS}
-tests/unit-offscr.bin:	tests/unit-offscr.o links.o offscr.o readq.o uri.o strbuf.o log.o
-	${CC} -o $@ tests/unit-offscr.o links.o offscr.o readq.o uri.o strbuf.o log.o ${LDFLAGS}
-tests/run-links.bin:	tests/run-links.o links.o offscr.o strbuf.o log.o
-	${CC} -o $@ tests/run-links.o links.o offscr.o strbuf.o log.o ${LDFLAGS}
-tests/run-offscr.bin:	tests/run-offscr.o offscr.o strbuf.o log.o
-	${CC} -o $@ tests/run-offscr.o offscr.o strbuf.o log.o ${LDFLAGS}
+tests/unit-links.bin:	tests/unit-links.o links.o ansi.o strbuf.o
+	${CC} -o $@ tests/unit-links.o links.o ansi.o strbuf.o ${LDFLAGS}
+tests/unit-styler.bin:	tests/unit-styler.o styler.o ansi.o strbuf.o
+	${CC} -o $@ tests/unit-styler.o styler.o ansi.o strbuf.o ${LDFLAGS}
+tests/unit-offscr.bin:	tests/unit-offscr.o links.o offscr.o readq.o uri.o ansi.o strbuf.o log.o
+	${CC} -o $@ tests/unit-offscr.o links.o offscr.o readq.o uri.o ansi.o strbuf.o log.o ${LDFLAGS}
+tests/run-links.bin:	tests/run-links.o links.o offscr.o ansi.o strbuf.o log.o
+	${CC} -o $@ tests/run-links.o links.o offscr.o ansi.o strbuf.o log.o ${LDFLAGS}
+tests/run-offscr.bin:	tests/run-offscr.o offscr.o ansi.o strbuf.o log.o
+	${CC} -o $@ tests/run-offscr.o offscr.o ansi.o strbuf.o log.o ${LDFLAGS}
 
 .SUFFIXES: .bin
 .o.bin:

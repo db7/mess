@@ -1,5 +1,6 @@
 #include "styler.h"
 
+#include "ansi.h"
 #include "strbuf.h"
 
 #include <errno.h>
@@ -19,29 +20,7 @@ strip_styles_slice_(const char *line, size_t len, size_t *out_len)
     while (idx < len) {
         unsigned char ch = (unsigned char)line[idx];
         if (ch == '\x1b') {
-            idx++;
-            if (idx >= len)
-                break;
-            unsigned char next = (unsigned char)line[idx];
-            idx++;
-            if (next == '[') {
-                while (idx < len) {
-                    unsigned char term = (unsigned char)line[idx++];
-                    if (term >= '@' && term <= '~')
-                        break;
-                }
-            } else if (next == ']') {
-                while (idx < len) {
-                    unsigned char cur = (unsigned char)line[idx++];
-                    if (cur == '\a')
-                        break;
-                    if (cur == '\x1b' && idx < len &&
-                        (unsigned char)line[idx] == '\\') {
-                        idx++;
-                        break;
-                    }
-                }
-            }
+            idx = ansi_skip_seq(line, len, idx);
             continue;
         }
         plain[out++] = (char)ch;

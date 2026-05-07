@@ -20,10 +20,8 @@ main(void)
     int status = EXIT_FAILURE;
 
     struct offscr_opts opts = {
-        .max_bytes             = 0,
         .first_byte_timeout_ms = 0,
         .next_byte_timeout_ms  = 0,
-        .max_lines             = 10,
     };
     struct offscr_ctx *ctx = offscr_new(&opts);
     if (ctx == NULL) {

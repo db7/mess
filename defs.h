@@ -8,10 +8,6 @@
 #else
 #define MESS_STATIC static
 #endif
-/*
- * Half-open range helper. start marks the first column/byte included in the
- * range and end points one past the final element.
- */
 struct range {
     size_t start;
     size_t end;

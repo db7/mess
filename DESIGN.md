@@ -15,9 +15,8 @@ This is the primary mode and the one most users experience when they run
   inside a pseudo-terminal, wiring the PTY master to its own stdout/stderr while
   letting the child inherit stdin directly. The parent proxies bytes between the
   user TTY and the child until a navigation hotkey is detected.
-- navigation trigger — the proxy loop inspects keystrokes for Tab, Shift-Tab,
-  `j`, `k`, `Enter`, `Esc`, `Ctrl-L`, `v`, `c`, `x`, and `D`. Once one of those
-  keys is seen the wrapper pauses the PTY traffic and enters navigation mode.
+- navigation trigger — the proxy loop inspects keystrokes for Tab. Once it is
+  seen the wrapper pauses the PTY traffic and enters navigation mode.
 - screen capture — in navigation mode the wrapper sends `Ctrl-L` to the child
   pager to force a redraw, then uses the `offscr` component to capture the PTY
   output. `offscr` uses inter-byte timeouts to decide when the dump is complete

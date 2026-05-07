@@ -15,7 +15,6 @@ test_link_offsets(void)
     struct offscr_view view = {
         .data      = sample,
         .len       = strlen(sample),
-        .truncated = 0,
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -40,7 +39,6 @@ test_parse_simple_snapshot(void)
     struct offscr_view view = {
         .data      = OSC8_SAMPLE_TWO_LINKS_,
         .len       = strlen(OSC8_SAMPLE_TWO_LINKS_),
-        .truncated = 0,
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -63,7 +61,6 @@ test_parse_positions(void)
     struct offscr_view view = {
         .data      = sample,
         .len       = strlen(sample),
-        .truncated = 0,
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -91,7 +88,6 @@ test_iter_match_and_next(void)
     struct offscr_view view = {
         .data      = sample,
         .len       = strlen(sample),
-        .truncated = 0,
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -131,7 +127,6 @@ test_empty_osc8_close_is_ignored(void)
     struct offscr_view view = {
         .data      = sample,
         .len       = strlen(sample),
-        .truncated = 0,
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -152,7 +147,6 @@ test_parse_multiple_modes(void)
     struct offscr_view view = {
         .data      = sample,
         .len       = strlen(sample),
-        .truncated = 0,
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -171,7 +165,6 @@ test_mixed_link_order(void)
     struct offscr_view view = {
         .data      = sample,
         .len       = strlen(sample),
-        .truncated = 0,
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -193,7 +186,6 @@ test_colored_man_token(void)
     struct offscr_view view = {
         .data      = sample,
         .len       = strlen(sample),
-        .truncated = 0,
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_MAN, &iter) == 0);

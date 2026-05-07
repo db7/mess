@@ -1,6 +1,3 @@
-/*
- * Minimal navigation session interface used by the simpler harness.
- */
 #ifndef NAV_H
 #define NAV_H
 
