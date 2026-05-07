@@ -3,12 +3,12 @@
 CC=		cc
 CFLAGS=		-O0 -g3 -Wall -Wextra -Werror
 CFLAGS.objs=	-std=c11 -MMD -MP
-CPPFLAGS=	-I. -Itests
+CPPFLAGS=	-I.
 LDFLAGS=
 LDLIBS=
 
-CFLAGS.cov=	${CFLAGS} -fprofile-arcs -ftest-coverage
-LDFLAGS.cov=	${LDFLAGS} -fprofile-arcs -ftest-coverage
+CFLAGS.cov=	${CFLAGS} --coverage
+LDFLAGS.cov=	${LDFLAGS} --coverage
 
 PREFIX=		/usr/local
 BINDIR=		${PREFIX}/bin
@@ -38,7 +38,10 @@ clean:
 	@find . \( -name '*.dSYM' \
 		-o -name '*.d' \
 		-o -name '*.o' \
-		-o -name '*.bin' \) -exec rm -rf {} +
+		-o -name '*.bin' \
+		-o -name '*.gcda' \
+		-o -name '*.gcno' \
+		-o -name '*.gcov' \) -exec rm -rf {} +
 
 distclean: clean
 	rm -rf version.sh mess.1

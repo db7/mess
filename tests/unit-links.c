@@ -141,6 +141,30 @@ test_parse_multiple_modes(void)
 }
 
 static void
+test_mixed_link_order(void)
+{
+    const char sample[] =
+        "printf(3) only\n"
+        "\x1b]8;;https://example.com\x1b\\Later\x1b]8;;\x1b\\\n";
+    struct offscr_view view = {
+        .data      = sample,
+        .len       = strlen(sample),
+        .truncated = 0,
+    };
+    struct link_iter iter = {0};
+    assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
+    assert(parse_links(&view, LINKS_KIND_MAN, &iter) == 0);
+    assert(iter.count == 2);
+    assert(iter.spans[0].kind == LINKS_KIND_MAN);
+    assert(iter.spans[0].row == 0);
+    assert(strcmp(iter.spans[0].link, "man://printf.3") == 0);
+    assert(iter.spans[1].kind == LINKS_KIND_OSC8);
+    assert(iter.spans[1].row == 1);
+    assert(strcmp(iter.spans[1].link, "https://example.com") == 0);
+    link_iter_free(&iter);
+}
+
+static void
 test_colored_man_token(void)
 {
     const char sample[]     = "\x1b[1;94mwordexp(3)\x1b[0m and others";
@@ -167,6 +191,7 @@ main(void)
     test_parse_positions();
     test_iter_match_and_next();
     test_parse_multiple_modes();
+    test_mixed_link_order();
     test_colored_man_token();
     test_link_offsets();
     puts("links tests OK");

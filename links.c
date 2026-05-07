@@ -25,6 +25,40 @@ ensure_capacity_(struct link_iter *res, size_t needed)
     return 0;
 }
 
+static int
+compare_spans_(const void *lhs, const void *rhs)
+{
+    const struct link_span *a = lhs;
+    const struct link_span *b = rhs;
+    if (!a || !b)
+        return 0;
+    if (a->row < b->row)
+        return -1;
+    if (a->row > b->row)
+        return 1;
+    if (a->columns.start < b->columns.start)
+        return -1;
+    if (a->columns.start > b->columns.start)
+        return 1;
+    if (a->row_offset < b->row_offset)
+        return -1;
+    if (a->row_offset > b->row_offset)
+        return 1;
+    if (a->indices.start < b->indices.start)
+        return -1;
+    if (a->indices.start > b->indices.start)
+        return 1;
+    return 0;
+}
+
+static void
+sort_spans_(struct link_iter *iter)
+{
+    if (iter == NULL || iter->count < 2)
+        return;
+    qsort(iter->spans, iter->count, sizeof(*iter->spans), compare_spans_);
+}
+
 static char *
 dup_range_(const char *start, size_t len)
 {
@@ -476,6 +510,9 @@ parse_links(const struct offscr_view *view, enum link_kind kind,
             rc = 0;
             break;
     }
+
+    if (rc == 0)
+        sort_spans_(out);
 
     free(row_offsets);
     return rc;

@@ -252,6 +252,13 @@ shortcut knows what to edit. When feeding the pager via stdin you can export
 .B MESSFILE
 ahead of time to give navigation mode the same context.
 .TP
+.B MESS_STATUS_LINKS
+Controls whether navigation mode prints the currently selected link after the
+`[mess]` status pip. The feature is enabled by default. Set the variable to
+`0`, `no`, or `false` (case insensitive) to suppress the link preview; any
+other value keeps it enabled. Long URLs are truncated to whatever fits on the
+status line.
+.TP
 .B MESS_MDRENDER
 Markdown renderer to apply before piping the output into the pager when opening
 `.md` files directly. The default command is

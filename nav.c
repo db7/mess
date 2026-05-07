@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <wordexp.h>
@@ -20,6 +21,7 @@ struct nav {
     int notify_wr;
     int parse_flags;
     const char *self_cmd;
+    bool show_status_link;
 };
 
 enum nav_action_type {
@@ -64,9 +66,13 @@ struct nav_state {
     size_t screen_cols;
     int out_fd;
     bool status_visible;
+    bool show_link_in_status;
+    bool has_active_link;
 };
 
 static struct nav *global_nav_;
+
+static bool env_flag_enabled_(const char *name, bool default_value);
 
 static void cycle_link_(struct nav_state *state, int direction,
                         struct nav_action_list *actions);
@@ -105,7 +111,29 @@ static void nav_status_clear_(struct nav_state *state);
 static void nav_render_full_screen_(struct nav_state *state);
 static void nav_show_status_message_(struct nav_state *state,
                                      const char *message);
+static const char *nav_selected_link_(const struct nav_state *state);
 #define NAV_NEXT_LINK_HOTKEY '\t'
+
+static bool
+env_flag_enabled_(const char *name, bool default_value)
+{
+    if (!name)
+        return default_value;
+    const char *value = getenv(name);
+    if (!value || value[0] == '\0')
+        return default_value;
+    if (strcmp(value, "0") == 0)
+        return false;
+    if (strcmp(value, "1") == 0)
+        return true;
+    if (strcasecmp(value, "false") == 0 || strcasecmp(value, "no") == 0 ||
+        strcasecmp(value, "off") == 0)
+        return false;
+    if (strcasecmp(value, "true") == 0 || strcasecmp(value, "yes") == 0 ||
+        strcasecmp(value, "on") == 0)
+        return true;
+    return default_value;
+}
 
 struct nav *
 nav_create(const struct nav_opts *opts)
@@ -119,6 +147,7 @@ nav_create(const struct nav_opts *opts)
     nav->parse_flags = parse_flags;
     nav->self_cmd =
         (opts && opts->self_cmd && opts->self_cmd[0]) ? opts->self_cmd : NULL;
+    nav->show_status_link = env_flag_enabled_("MESS_STATUS_LINKS", true);
     int pipefd[2];
     if (pipe(pipefd) == -1) {
         free(nav);
@@ -160,6 +189,8 @@ nav_run(struct nav *nav, const struct offscr_view *view, struct readq *rq,
         .out_fd         = out_fd,
         .screen_cols    = width,
         .status_visible = false,
+        .show_link_in_status = nav->show_status_link,
+        .has_active_link     = false,
     };
 
     int parse_flags = nav->parse_flags;
@@ -433,13 +464,18 @@ static size_t
 collect_block_(struct nav_state *state, size_t start_idx,
                struct nav_action_list *actions)
 {
-    size_t count = state->cur.count;
-    if (count == 0)
+    if (!state)
         return start_idx;
+    size_t count = state->cur.count;
+    if (count == 0) {
+        state->has_active_link = false;
+        return start_idx;
+    }
 
     size_t idx       = start_idx % count;
     size_t processed = 0;
     bool first_entry = true;
+    bool highlighted = false;
 
     const struct link_span *first_span = links_get(&state->cur, idx);
     const char *url                    = first_span ? first_span->link : NULL;
@@ -455,6 +491,7 @@ collect_block_(struct nav_state *state, size_t start_idx,
         if (line)
             append_replace_line_action_(actions, span->row, line, !first_entry);
 
+        highlighted = true;
         processed++;
         first_entry = false;
         idx         = step_index_(idx, count, +1);
@@ -462,6 +499,7 @@ collect_block_(struct nav_state *state, size_t start_idx,
             break;
     }
 
+    state->has_active_link = highlighted;
     return idx;
 }
 
@@ -782,9 +820,29 @@ nav_draw_status_bar_(struct nav_state *state)
 
     memset(bar, ' ', width);
     size_t label_len = strlen(pip_label);
-    if (label_len > width)
-        label_len = width;
-    memcpy(bar, pip_label, label_len);
+    size_t copy_len  = (label_len > width) ? width : label_len;
+    memcpy(bar, pip_label, copy_len);
+
+    const char *selected_link = nav_selected_link_(state);
+    if (selected_link && copy_len < width) {
+        static const char prefix[] = "=> ";
+        size_t pos = copy_len;
+        for (size_t i = 0; i < sizeof(prefix) - 1 && pos < width; ++i)
+            bar[pos++] = prefix[i];
+        if (pos < width) {
+            size_t remaining = width - pos;
+            size_t link_len  = strlen(selected_link);
+            if (link_len <= remaining) {
+                memcpy(bar + pos, selected_link, link_len);
+            } else if (remaining >= 4) {
+                size_t display = remaining - 3;
+                memcpy(bar + pos, selected_link, display);
+                memcpy(bar + pos + display, "...", 3);
+            } else {
+                memcpy(bar + pos, selected_link, remaining);
+            }
+        }
+    }
     (void)write(state->out_fd, color_start, sizeof(color_start) - 1);
     (void)write(state->out_fd, bar, width);
     free(bar);
@@ -859,6 +917,20 @@ nav_show_status_message_(struct nav_state *state, const char *message)
     (void)write(state->out_fd, color_end, sizeof(color_end) - 1);
     (void)write(state->out_fd, "\r", 1);
     state->status_visible = true;
+}
+
+static const char *
+nav_selected_link_(const struct nav_state *state)
+{
+    if (!state || !state->show_link_in_status || !state->has_active_link)
+        return NULL;
+    if (state->prev.count == 0)
+        return NULL;
+    const struct link_span *span =
+        links_get(&state->prev, state->prev.index % state->prev.count);
+    if (!span || !span->link || span->link[0] == '\0')
+        return NULL;
+    return span->link;
 }
 
 static void

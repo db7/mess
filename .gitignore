@@ -4,6 +4,9 @@ compile_flags.txt
 *.orig
 *.o
 *.d
+*.gcno
+*.gcda
+*.gcov
 mess
 simpler
 mess.1

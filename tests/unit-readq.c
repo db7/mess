@@ -54,10 +54,45 @@ test_refill_preserves_unread_bytes_(void)
     close(fds[0]);
 }
 
+// Confirm inline helpers wire up to the queue fields correctly.
+static void
+test_inline_helpers_(void)
+{
+    int fds[2];
+    assert(pipe(fds) == 0);
+
+    struct readq queue;
+    readq_init(&queue, fds[0]);
+
+    assert(readq_fd(&queue) == fds[0]);
+    assert(readq_data(&queue) == queue.buffer);
+    assert(readq_len(&queue) == 0);
+
+    write_all_(fds[1], "abc");
+    assert(readq_refill(&queue));
+    assert(readq_data(&queue) == queue.buffer);
+    assert(readq_len(&queue) == 3);
+    assert(readq_len(&queue) == readq_available_bytes(&queue));
+
+    // Advance one byte and ensure the helpers track the new start.
+    assert(readq_get_next(&queue) == 'a');
+    assert(readq_data(&queue) == queue.buffer + 1);
+    assert(readq_len(&queue) == 2);
+
+    readq_clear(&queue);
+    assert(queue.start == 0 && queue.end == 0);
+    assert(readq_data(&queue) == queue.buffer);
+    assert(readq_len(&queue) == 0);
+
+    close(fds[0]);
+    close(fds[1]);
+}
+
 int
 main(void)
 {
     test_refill_preserves_unread_bytes_();
+    test_inline_helpers_();
     puts("readq tests OK");
     return 0;
 }
