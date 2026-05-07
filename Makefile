@@ -6,12 +6,12 @@ TARGETS=	mess
 TESTS_SRC=	tests/test-nav.c \
 		tests/test-parser.c \
 		tests/test-reader.c \
-		tests/integration/test-terminal.c
+		tests/test-uri.c
 
 TESTS_BIN=	tests/test-nav.bin \
 		tests/test-parser.bin \
 		tests/test-reader.bin \
-		tests/integration/test-terminal.bin
+		tests/test-uri.bin
 
 CFLAGS=		-O2 -g
 CFLAGS+= 	-I. -std=c11 -Wall -Wextra -Werror
@@ -51,8 +51,11 @@ test: $(TARGETS) $(TESTS_BIN)
 			./$$t; \
 		fi; \
 	done
+	@for f in tests/dispatcher/*.c; do \
+		tikl -v -c tests/dispatcher/tikl.conf $$f; \
+	done
 
-mess: mess.c pager.c man.c wrapper.c nav.c readq.c
+mess: main.c dispatcher.c pager.c nav.c readq.c uri.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 install: mess mess.1
@@ -61,10 +64,7 @@ install: mess mess.1
 	$(INSTALL) -d "$(DESTDIR)$(MANDIR)/man1"
 	$(INSTALL) -m 644 mess.1 "$(DESTDIR)$(MANDIR)/man1/mess.1"
 
-tests/test-%.bin: tests/test-%.c nav.c readq.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
-
-tests/integration/test-%.bin: tests/integration/test-%.c pager.c wrapper.c nav.c readq.c
+tests/test-%.bin: tests/test-%.c nav.c readq.c uri.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 format:

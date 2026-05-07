@@ -249,11 +249,13 @@ test_regular_keys_keep_selection_(void)
     (void)nav_hit_('\t');
     assert(nav_selected_index() == 0);
     assert(!nav_status_visible());
+    bool freeze_initial = nav_freeze_enabled();
 
     bool forwarded = nav_hit_('x');
     assert(!forwarded);
     assert(nav_selected_index() == 0);
-    assert(nav_status_visible());
+    assert(nav_freeze_enabled() != freeze_initial);
+    assert(!nav_status_visible());
 }
 
 static void
@@ -270,11 +272,6 @@ test_status_toggle_with_s_(void)
 
     bool forwarded = nav_hit_('s');
     assert(!forwarded);
-    assert(nav_status_visible());
-
-    forwarded = nav_hit_('x');
-    assert(!forwarded);
-    assert(nav_selected_index() == 0);
     assert(nav_status_visible());
 
     forwarded = nav_hit_('s');

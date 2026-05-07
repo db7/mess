@@ -50,10 +50,8 @@ static bool needs_refresh_;
 // Reason: Allow callers to plug in a custom document editor while defaulting to
 // launch_with_editor_.
 static nav_editor_fn editor_launcher_;
-// Reason: Remember the active document so navigation can open it in an editor.
-static char *document_path_;
 // Reason: Represent the possible states for the status/overlay line.
-typedef enum { STATUS_NONE = 0, STATUS_LINK, STATUS_HELP } status_mode_t;
+typedef enum { STATUS_NONE = 0, STATUS_LINK, STATUS_HELP, STATUS_DEBUG } status_mode_t;
 
 // Reason: File descriptor used to render status lines inside the terminal UI.
 static int status_fd_ = -1;
@@ -70,6 +68,21 @@ static bool status_pending_hide_;
 static nav_mode_t nav_mode_ = NAV_MODE_OSC8;
 // Reason: Flag to force flushing of buffered bytes when the child stream ends.
 static bool force_drain_;
+// Reason: Toggle per-link coloring when requested via 'd'.
+static bool colorize_links_;
+static bool freeze_enabled_ = true;
+static bool output_dirty_;
+// Reason: Distinct ANSI palettes for link markers/highlighting.
+static const char *const link_color_table_[] = {
+    "\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m",
+    "\x1b[35m", "\x1b[36m", "\x1b[91m", "\x1b[94m"};
+static const size_t link_color_count_ =
+    sizeof(link_color_table_) / sizeof(link_color_table_[0]);
+static const char color_reset_[] = "\x1b[0m";
+// Reason: Remember how many lines of the debug overlay are currently painted.
+static int debug_overlay_lines_;
+// Reason: Delay pip rendering until after the pager redraw completes.
+static bool pip_needs_redraw_;
 // Reason: Boundaries for the man-page token parser; tokens longer than these
 // will be ignored so buffering stays simple.
 #define MAN_NAME_MAX    64
@@ -84,7 +97,7 @@ static void free_pair_(LinkEntry *pair);
 static int logical_to_physical_(int idx);
 static int launch_with_mess_(const char *link, const char *text);
 static int launch_with_editor_(const char *path);
-static void free_document_path_(void);
+static const char *current_document_path_(void);
 static bool cycle_link_selection_(int direction);
 static void leave_navigation_mode_(bool request_refresh);
 static void debug_status_bytes_(const char *tag, const void *buf, size_t len);
@@ -94,7 +107,13 @@ static int group_start_index_(int idx);
 static int group_end_index_(int idx);
 static int next_group_start_(int idx, int direction);
 static void show_help_overlay_(void);
+static void toggle_debug_overlay_(void);
 static size_t build_help_overlay_(char *dest, size_t cap, size_t width);
+static void clear_debug_overlay_lines_(void);
+static void render_debug_overlay_lines_(void);
+static void render_nav_mode_pip_(bool active);
+static void request_nav_pip_refresh_(void);
+static void maybe_render_nav_pip_(void);
 static ssize_t nav_process_output_osc_(struct readq *bq, bool drain);
 static ssize_t nav_process_output_man_(struct readq *bq, bool drain);
 static size_t nav_render_highlighted_osc_(const char *input, size_t len,
@@ -103,10 +122,13 @@ static size_t nav_render_highlighted_man_(const char *input, size_t len,
         char *dest, size_t dest_cap);
 static bool nav_pair_matches_selection_(const char *link, size_t link_len,
                                         const char *text, size_t text_len);
+static const char *color_for_bytes_(const char *data, size_t len);
 static void nav_store_entry_(char *link, char *text, size_t text_len);
 static bool nav_record_link_copy_(const char *link, size_t link_len,
                                   const char *text, size_t text_len);
 static void nav_scan_man_chunk_(const char *data, size_t len);
+static size_t man_strip_overstrike_(const char *data, size_t len, char *dest,
+                                    size_t dest_cap, size_t *map);
 static size_t man_suffix_to_keep_(const char *data, size_t len, bool drain);
 static bool man_match_at_(const char *data, size_t len, size_t pos,
                           size_t *name_len, size_t *section_offset,
@@ -266,16 +288,18 @@ read_more_input_(char *dest, size_t max)
 static bool
 handle_key_input_(char key)
 {
-    // Reason: 'v' edits the current document, exiting mess mode when active.
+    // Reason: 'v' edits the current document pointed to by $MESSFILE, exiting
+    // mess mode when active.
     if ((key == 'v' || key == 'V')) {
+        const char *doc_path = current_document_path_();
         if (selected_idx_ != -1) {
-            if (document_path_ && editor_launcher_)
-                editor_launcher_(document_path_);
+            if (doc_path && editor_launcher_)
+                editor_launcher_(doc_path);
             leave_navigation_mode_(true);
             return true;
         }
-        if (document_path_ && editor_launcher_) {
-            editor_launcher_(document_path_);
+        if (doc_path && editor_launcher_) {
+            editor_launcher_(doc_path);
             nav_request_refresh();
             return true;
         }
@@ -285,6 +309,9 @@ handle_key_input_(char key)
     if (key == '\t') {
         // Reason: Tab advances to the next hyperlink in logical order.
         bool moved = cycle_link_selection_(+1);
+        return moved;
+    } else if (key == '\b' || key == '\x7f' || key == 'k' || key == 'K') {
+        bool moved = cycle_link_selection_(-1);
         return moved;
     } else if (key == '\n' && selected_idx_ != -1) {
         // Reason: Enter activates the highlighted link through the configured
@@ -296,7 +323,7 @@ handle_key_input_(char key)
             leave_navigation_mode_(true);
             // nav_render_status();
         }
-    } else if (key == '\e') {
+    } else if (key == '\e' || key == '\f') {
         if (selected_idx_ == -1)
             return false;
         // Reason: Escape abandons navigation mode and restores normal input
@@ -308,6 +335,22 @@ handle_key_input_(char key)
             return false;
         status_mode_         = STATUS_LINK;
         status_pending_hide_ = true;
+        return true;
+    } else if (key == 'c' || key == 'C') {
+        if (selected_idx_ == -1)
+            return false;
+        colorize_links_ = !colorize_links_;
+        nav_request_refresh();
+        return true;
+    } else if (key == 'D') {
+        if (selected_idx_ == -1)
+            return false;
+        toggle_debug_overlay_();
+        return true;
+    } else if (key == 'x' || key == 'X') {
+        if (selected_idx_ == -1)
+            return false;
+        nav_toggle_freeze();
         return true;
     } else {
         return false;
@@ -404,10 +447,12 @@ next_group_start_(int idx, int direction)
 static bool
 cycle_link_selection_(int direction)
 {
+    bool was_active = (selected_idx_ >= 0);
     if (url_count_ == 0) {
         // Reason: Without any stored URLs there is nothing to select or render.
         selected_idx_ = -1;
         nav_clear_status();
+        render_nav_mode_pip_(false);
         return false;
     }
 
@@ -421,6 +466,12 @@ cycle_link_selection_(int direction)
     }
     if (status_mode_ != STATUS_NONE)
         nav_clear_status();
+    if (!was_active && selected_idx_ >= 0) {
+        render_nav_mode_pip_(true);
+        request_nav_pip_refresh_();
+    } else if (was_active && selected_idx_ < 0) {
+        render_nav_mode_pip_(false);
+    }
     // Reason: Any selection change should mark the UI for refresh.
     nav_request_refresh();
     return true;
@@ -686,6 +737,40 @@ nav_render_highlighted_osc_(const char *input, size_t len, char *dest,
         size_t text_len = (size_t)(text_end - text_start);
         bool highlight  =
             nav_pair_matches_selection_(link_start, link_len, text_start, text_len);
+        const char *color_code     = NULL;
+        size_t color_len           = 0;
+        const size_t reset_len     = sizeof(color_reset_) - 1;
+        size_t color_source_len    = 0;
+        const char *color_source   = NULL;
+        if (colorize_links_) {
+            color_source     = url_count_ > 0 ? NULL : link_start;
+            color_source_len = link_len;
+            if (selected_idx_ >= 0) {
+                int phys_sel = logical_to_physical_(selected_idx_);
+                if (phys_sel >= 0 && urls_[phys_sel].link) {
+                    color_source     = urls_[phys_sel].link;
+                    color_source_len = strlen(color_source);
+                }
+            }
+            if (!color_source) {
+                color_source     = link_start;
+                color_source_len = link_len;
+            }
+            if (color_source && color_source_len > 0) {
+                color_code = color_for_bytes_(color_source, color_source_len);
+                if (color_code)
+                    color_len = strlen(color_code);
+                else
+                    color_len = 0;
+            }
+        }
+
+        if (color_code) {
+            if (out + color_len > dest_cap)
+                return 0;
+            memcpy(dest + out, color_code, color_len);
+            out += color_len;
+        }
 
         if (highlight) {
             if (out + highlight_on_len + text_len + highlight_off_len >
@@ -702,6 +787,13 @@ nav_render_highlighted_osc_(const char *input, size_t len, char *dest,
                 return 0;
             memcpy(dest + out, text_start, text_len);
             out += text_len;
+        }
+
+        if (color_code) {
+            if (out + reset_len > dest_cap)
+                return 0;
+            memcpy(dest + out, color_reset_, reset_len);
+            out += reset_len;
         }
 
         if (out + closing_len > dest_cap)
@@ -723,24 +815,28 @@ nav_render_highlighted_man_(const char *input, size_t len, char *dest,
     const size_t highlight_off_len = strlen(HIGHLIGHT_OFF);
     size_t pos                     = 0;
     size_t out                     = 0;
+    size_t raw_cursor              = 0;
+    char plain[READQ_SIZE];
+    size_t map[READQ_SIZE];
+    size_t plain_len =
+        man_strip_overstrike_(input, len, plain, sizeof(plain), map);
 
-    // Reason: Scan plain text for `name(section)` tokens and wrap the selected
-    // one in inverse-video sequences much like the OSC8 path does.
-    while (pos < len) {
+    // Reason: Scan cleaned text for `name(section)` tokens but inject highlight
+    // sequences into the original output so formatting (bold/underline) stays
+    // intact.
+    while (pos < plain_len) {
         size_t name_len = 0;
         size_t section_offset;
         size_t section_len = 0;
         size_t token_len   = 0;
         if (!man_match_at_(
-                input, len, pos, &name_len, &section_offset, &section_len,
+                plain, plain_len, pos, &name_len, &section_offset, &section_len,
                 &token_len)) {
-            if (out + 1 > dest_cap)
-                return 0;
-            dest[out++] = input[pos++];
+            pos++;
             continue;
         }
 
-        const char *name    = input + pos;
+        const char *name    = plain + pos;
         const char *section = name + section_offset;
         char link_buf[MAN_NAME_MAX + MAN_SECTION_MAX + 16];
         size_t link_len =
@@ -749,25 +845,80 @@ nav_render_highlighted_man_(const char *input, size_t len, char *dest,
         bool highlight = link_len > 0 &&
                          nav_pair_matches_selection_(link_buf, link_len, name,
                              token_len);
+        const char *color_code = NULL;
+        size_t color_len       = 0;
+        const size_t reset_len = sizeof(color_reset_) - 1;
+        if (colorize_links_ && link_len > 0) {
+            color_code = color_for_bytes_(link_buf, link_len);
+            if (color_code && color_code[0] != '\0')
+                color_len = strlen(color_code);
+            else
+                color_code = NULL;
+        }
 
-        size_t needed = token_len + (highlight
-                                     ? (highlight_on_len + highlight_off_len)
-                                     : 0);
-        if (out + needed > dest_cap)
-            return 0;
+        size_t raw_start = map[pos];
+        size_t end_index = (token_len == 0) ? pos : (pos + token_len - 1);
+        if (end_index >= plain_len)
+            end_index = plain_len ? (plain_len - 1) : 0;
+        size_t raw_end = map[end_index];
+        if (raw_end < raw_start)
+            raw_end = raw_start;
+        size_t raw_len = raw_end - raw_start + 1;
 
+        if (raw_start > len)
+            raw_start = len;
+        if (raw_end >= len)
+            raw_end = len ? len - 1 : 0;
+
+        if (raw_start > raw_cursor) {
+            size_t chunk = raw_start - raw_cursor;
+            if (out + chunk > dest_cap)
+                return 0;
+            memcpy(dest + out, input + raw_cursor, chunk);
+            out += chunk;
+        }
+
+        if (color_code) {
+            if (out + color_len > dest_cap)
+                return 0;
+            memcpy(dest + out, color_code, color_len);
+            out += color_len;
+        }
         if (highlight) {
+            if (out + highlight_on_len > dest_cap)
+                return 0;
             memcpy(dest + out, HIGHLIGHT_ON, highlight_on_len);
             out += highlight_on_len;
         }
-        memcpy(dest + out, name, token_len);
-        out += token_len;
+
+        if (out + raw_len > dest_cap)
+            return 0;
+        memcpy(dest + out, input + raw_start, raw_len);
+        out += raw_len;
+
         if (highlight) {
+            if (out + highlight_off_len > dest_cap)
+                return 0;
             memcpy(dest + out, HIGHLIGHT_OFF, highlight_off_len);
             out += highlight_off_len;
         }
+        if (color_code) {
+            if (out + reset_len > dest_cap)
+                return 0;
+            memcpy(dest + out, color_reset_, reset_len);
+            out += reset_len;
+        }
 
+        raw_cursor = raw_end + 1;
         pos += token_len;
+    }
+
+    if (raw_cursor < len) {
+        size_t chunk = len - raw_cursor;
+        if (out + chunk > dest_cap)
+            return 0;
+        memcpy(dest + out, input + raw_cursor, chunk);
+        out += chunk;
     }
 
     return out;
@@ -853,30 +1004,58 @@ man_format_link_(char *dest, size_t cap, const char *name, size_t name_len,
 static void
 nav_scan_man_chunk_(const char *data, size_t len)
 {
+    char plain[READQ_SIZE];
+    size_t plain_len =
+        man_strip_overstrike_(data, len, plain, sizeof(plain), NULL);
     size_t pos = 0;
-    while (pos < len) {
+    while (pos < plain_len) {
         size_t name_len = 0;
         size_t section_offset;
         size_t section_len = 0;
         size_t token_len   = 0;
-        if (!man_match_at_(data, len, pos, &name_len, &section_offset,
+        if (!man_match_at_(plain, plain_len, pos, &name_len, &section_offset,
                            &section_len, &token_len)) {
             pos++;
             continue;
         }
 
-        const char *name    = data + pos;
+        const char *name    = plain + pos;
         const char *section = name + section_offset;
         char link_buf[MAN_NAME_MAX + MAN_SECTION_MAX + 16];
         size_t link_len =
             man_format_link_(link_buf, sizeof(link_buf), name, name_len,
                              section, section_len);
-        if (link_len > 0)
-            // Reason: Copy the discovered token into navigation storage so it
-            // behaves like a standard OSC link entry.
+        if (link_len > 0) {
+            // Reason: Copy the discovered token into navigation storage using
+            // the cleaned text so status overlays stay readable.
             nav_record_link_copy_(link_buf, link_len, name, token_len);
+        }
         pos += token_len;
     }
+}
+
+static size_t
+man_strip_overstrike_(const char *data, size_t len, char *dest, size_t dest_cap,
+                      size_t *map)
+{
+    if (!data || !dest || dest_cap == 0)
+        return 0;
+    size_t out = 0;
+    for (size_t i = 0; i < len; ++i) {
+        char ch = data[i];
+        if (ch == '\b') {
+            if (out > 0)
+                out--;
+            continue;
+        }
+        if (out >= dest_cap)
+            break;
+        dest[out] = ch;
+        if (map)
+            map[out] = i;
+        out++;
+    }
+    return out;
 }
 
 static size_t
@@ -1007,6 +1186,11 @@ nav_reset(void)
     status_pending_hide_ = false;
     input_fd_            = -1;
     force_drain_         = false;
+    colorize_links_      = false;
+    debug_overlay_lines_ = 0;
+    pip_needs_redraw_     = false;
+    freeze_enabled_      = true;
+    output_dirty_        = false;
 }
 
 void
@@ -1100,6 +1284,19 @@ nav_pair_matches_selection_(const char *link, size_t link_len,
     return false;
 }
 
+static const char *
+color_for_bytes_(const char *data, size_t len)
+{
+    if (!data || len == 0 || link_color_count_ == 0)
+        return link_color_count_ ? link_color_table_[0] : "";
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < len; ++i) {
+        hash ^= (unsigned char)data[i];
+        hash *= 16777619u;
+    }
+    return link_color_table_[hash % link_color_count_];
+}
+
 void
 nav_set_launcher(nav_launcher_fn launcher)
 {
@@ -1120,19 +1317,16 @@ nav_set_editor_launcher(nav_editor_fn launcher)
 void
 nav_set_document_path(const char *path)
 {
-    // Reason: Replace any existing document association before storing the new
-    // one.
-    free_document_path_();
+    // Reason: Store the active document path in the environment so helpers can
+    // read it without consulting internal state.
     if (path && path[0]) {
-        // Reason: Only duplicate non-empty paths so empty strings behave like
-        // clearing the document.
-        document_path_ = strdup(path);
-        if (!document_path_) {
-            perror("strdup document path");
-            // The rest of the code assumes the document path is either valid or
-            // NULL; abort instead of leaving callers with a dangling pointer.
-            // Reason: Terminate immediately to prevent inconsistent navigation
-            // state.
+        if (setenv("MESSFILE", path, 1) == -1) {
+            perror("setenv MESSFILE");
+            exit(EXIT_FAILURE);
+        }
+    } else {
+        if (unsetenv("MESSFILE") == -1) {
+            perror("unsetenv MESSFILE");
             exit(EXIT_FAILURE);
         }
     }
@@ -1141,10 +1335,18 @@ nav_set_document_path(const char *path)
 const char *
 nav_document_path(void)
 {
-    // Reason: Expose the current document so the UI can display or use it
-    // elsewhere. Reason: Return the stored path pointer directly; callers treat
-    // NULL as unset.
-    return document_path_;
+    // Reason: Expose the document path sourced from $MESSFILE so callers can
+    // reuse it without duplicating environment lookups.
+    return current_document_path_();
+}
+
+static const char *
+current_document_path_(void)
+{
+    const char *path = getenv("MESSFILE");
+    if (!path || !*path)
+        return NULL;
+    return path;
 }
 
 void
@@ -1156,7 +1358,7 @@ nav_request_refresh(void)
 }
 
 static void
-write_status_line_(const char *text, bool is_help)
+write_status_line_(const char *text, size_t explicit_len, status_mode_t mode)
 {
     // Reason: Skip rendering when no status fd is configured.
     if (status_fd_ < 0)
@@ -1195,21 +1397,20 @@ write_status_line_(const char *text, bool is_help)
     (void)write(status_fd_, clear_seq, sizeof(clear_seq) - 1);
     debug_status_bytes_("status-clear", clear_seq, sizeof(clear_seq) - 1);
 
-    char rendered[256];
+    char rendered[512];
     const char *out_text = text ? text : "";
     size_t len           = 0;
 
-    if (is_help) {
+    if (mode == STATUS_HELP) {
         len      = build_help_overlay_(rendered, sizeof(rendered), width);
         out_text = rendered;
     } else {
-        len = strlen(out_text);
+        len = (explicit_len == (size_t)-1)
+                  ? (out_text ? strlen(out_text) : 0)
+                  : explicit_len;
+        if (width > 0 && len > width)
+            len = width;
     }
-
-    // Reason: Clamp the text length to the measured terminal width to avoid
-    // wrapping.
-    if (width > 0 && len > width)
-        len = width;
     if (len > 0) {
         // Reason: Output the truncated status text to the terminal line.
         (void)write(status_fd_, out_text, len);
@@ -1228,10 +1429,13 @@ write_status_line_(const char *text, bool is_help)
 void
 nav_clear_status(void)
 {
+    if (status_mode_ == STATUS_DEBUG)
+        clear_debug_overlay_lines_();
     // Reason: An empty string removes any previously displayed status line.
     status_mode_         = STATUS_NONE;
     status_pending_hide_ = false;
-    write_status_line_("", false);
+    write_status_line_("", 0, STATUS_NONE);
+    maybe_render_nav_pip_();
 }
 
 void
@@ -1240,7 +1444,13 @@ nav_render_status(void)
     if (status_mode_ == STATUS_NONE)
         return;
     if (status_mode_ == STATUS_HELP) {
-        write_status_line_(NULL, true);
+        write_status_line_(NULL, (size_t)-1, STATUS_HELP);
+        return;
+    }
+    if (status_mode_ == STATUS_DEBUG) {
+        render_debug_overlay_lines_();
+        render_nav_mode_pip_(selected_idx_ >= 0);
+        pip_needs_redraw_ = false;
         return;
     }
     if (status_mode_ == STATUS_LINK) {
@@ -1264,8 +1474,31 @@ nav_render_status(void)
             return;
         // Reason: Emit the formatted status string to the configured terminal
         // row.
-        write_status_line_(buffer, false);
+        write_status_line_(buffer, (size_t)-1, STATUS_LINK);
     }
+    maybe_render_nav_pip_();
+}
+
+bool
+nav_freeze_enabled(void)
+{
+    return freeze_enabled_;
+}
+
+void
+nav_toggle_freeze(void)
+{
+    freeze_enabled_ = !freeze_enabled_;
+    request_nav_pip_refresh_();
+}
+
+void
+nav_set_output_dirty(bool dirty)
+{
+    if (output_dirty_ == dirty)
+        return;
+    output_dirty_ = dirty;
+    request_nav_pip_refresh_();
 }
 
 static void
@@ -1275,6 +1508,17 @@ show_help_overlay_(void)
     status_pending_hide_ = true;
 }
 
+static void
+toggle_debug_overlay_(void)
+{
+    if (status_mode_ == STATUS_DEBUG) {
+        nav_clear_status();
+        return;
+    }
+    status_mode_         = STATUS_DEBUG;
+    status_pending_hide_ = false;
+}
+
 static size_t
 build_help_overlay_(char *dest, size_t cap, size_t width)
 {
@@ -1282,8 +1526,8 @@ build_help_overlay_(char *dest, size_t cap, size_t width)
         return 0;
 
     const char *segments[] = {"Tab next", "S-Tab prev", "Enter open",
-                              "v edit",   "s link",     "Esc exit"
-                             };
+                              "v edit",   "s link",     "d color",  "D debug",
+                              "Esc exit"};
     const size_t seg_count = sizeof(segments) / sizeof(segments[0]);
     const char *separator  = "  ";
     size_t sep_len         = strlen(separator);
@@ -1333,6 +1577,140 @@ build_help_overlay_(char *dest, size_t cap, size_t width)
 
     dest[used] = '\0';
     return used;
+}
+
+static void
+clear_debug_overlay_lines_(void)
+{
+    if (status_fd_ < 0 || debug_overlay_lines_ == 0)
+        return;
+    struct winsize ws;
+    if (ioctl(status_fd_, TIOCGWINSZ, &ws) == -1) {
+        ws.ws_row = debug_overlay_lines_;
+    }
+    char move[32];
+    static const char clear_seq[] = "\r\x1b[K";
+    for (int i = 0; i < debug_overlay_lines_; ++i) {
+        int row = ws.ws_row - (debug_overlay_lines_ - 1 - i);
+        if (row < 1)
+            continue;
+        int movelen = snprintf(move, sizeof(move), "\033[%d;1H", row);
+        if (movelen > 0)
+            (void)write(status_fd_, move, (size_t)movelen);
+        (void)write(status_fd_, clear_seq, sizeof(clear_seq) - 1);
+    }
+    debug_overlay_lines_ = 0;
+}
+
+static void
+render_debug_overlay_lines_(void)
+{
+    if (status_fd_ < 0)
+        return;
+
+    struct winsize ws;
+    if (ioctl(status_fd_, TIOCGWINSZ, &ws) == -1 || ws.ws_row <= 0)
+        return;
+
+    clear_debug_overlay_lines_();
+
+    const char *seen[MAX_URLS];
+    size_t seen_count = 0;
+    char move[32];
+    static const char clear_seq[] = "\r\x1b[K";
+
+    for (int i = 0; i < url_count_; ++i) {
+        int physical = logical_to_physical_(i);
+        if (physical < 0)
+            continue;
+        const char *link = urls_[physical].link ? urls_[physical].link : "";
+        bool duplicate   = false;
+        for (size_t s = 0; s < seen_count; ++s) {
+            if (link && seen[s] && strcmp(link, seen[s]) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
+        if (seen_count >= (size_t)ws.ws_row)
+            break;
+        seen[seen_count++] = link;
+        int row = ws.ws_row - (int)seen_count + 1;
+        if (row < 1)
+            break;
+        int movelen = snprintf(move, sizeof(move), "\033[%d;1H", row);
+        if (movelen > 0)
+            (void)write(status_fd_, move, (size_t)movelen);
+        (void)write(status_fd_, clear_seq, sizeof(clear_seq) - 1);
+        const char *text  = urls_[physical].text ? urls_[physical].text : "";
+        const char *color = (link && link[0])
+                                ? color_for_bytes_(link, strlen(link))
+                                : NULL;
+        char line[512];
+        int len = snprintf(line, sizeof(line), "%s\x1b[7m  \x1b[0m %s => %s%s",
+                           color ? color : "", text, link, color ? color_reset_ : "");
+        if (len > 0)
+            (void)write(status_fd_, line, (size_t)len);
+    }
+
+    debug_overlay_lines_ = (int)seen_count;
+}
+
+static void
+render_nav_mode_pip_(bool active)
+{
+    if (status_fd_ < 0)
+        return;
+    struct winsize ws;
+    if (ioctl(status_fd_, TIOCGWINSZ, &ws) == -1 || ws.ws_col <= 0)
+        return;
+    const char label[] = "mess";
+    char extras[8];
+    size_t extra_len = 0;
+    if (freeze_enabled_)
+        extras[extra_len++] = 'F';
+    if (output_dirty_)
+        extras[extra_len++] = '!';
+    extras[extra_len] = '\0';
+    size_t total_len  = strlen(label) + extra_len;
+    int start_col      = ws.ws_col - (int)total_len + 1;
+    if (start_col < 1)
+        start_col = 1;
+    char move[32];
+    int movelen = snprintf(move, sizeof(move), "\033[1;%dH", start_col);
+    if (movelen > 0)
+        (void)write(status_fd_, move, (size_t)movelen);
+    if (active) {
+        char buf[48];
+        int len = snprintf(buf, sizeof(buf), "\x1b[7m%s%s\x1b[0m", label, extras);
+        if (len > 0)
+            (void)write(status_fd_, buf, (size_t)len);
+    } else {
+        size_t width = total_len;
+        if (width > 0) {
+            char blank[32];
+            if (width >= sizeof(blank))
+                width = sizeof(blank) - 1;
+            memset(blank, ' ', width);
+            (void)write(status_fd_, blank, width);
+        }
+    }
+}
+
+static void
+request_nav_pip_refresh_(void)
+{
+    pip_needs_redraw_ = true;
+}
+
+static void
+maybe_render_nav_pip_(void)
+{
+    if (!pip_needs_redraw_)
+        return;
+    render_nav_mode_pip_(selected_idx_ >= 0);
+    pip_needs_redraw_ = false;
 }
 
 
@@ -1473,17 +1851,14 @@ nav_set_input_fd(int fd)
 static void
 leave_navigation_mode_(bool request_refresh)
 {
-    // Reason: Ignore requests when no selection is active.
     if (selected_idx_ == -1)
         return;
-    // Reason: Clearing the selection disables link-specific key handling.
     selected_idx_ = -1;
     if (request_refresh)
-        // Reason: Some callers want to trigger a status update immediately
-        // after exit.
         nav_request_refresh();
-    // Reason: Ensure no stale status remains after leaving navigation mode.
     nav_clear_status();
+    render_nav_mode_pip_(false);
+    pip_needs_redraw_ = false;
 }
 
 static void
@@ -1625,15 +2000,4 @@ launch_with_editor_(const char *path)
     // Reason: Treat abnormal terminations as failure so callers know the edit
     // did not complete.
     return -1;
-}
-
-// Release the stored document path string.
-static void
-free_document_path_(void)
-{
-    // Reason: Avoid leaking the duplicated document path between navigation
-    // sessions.
-    free(document_path_);
-    // Reason: Reset the pointer so callers never observe stale memory.
-    document_path_ = NULL;
 }

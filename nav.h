@@ -70,6 +70,11 @@ void nav_request_refresh(void);
 // Re-render the status line for the current selection (or clear it).
 void nav_render_status(void);
 
+// Inspect/toggle freeze + output-dirty indicators used by the pager wrapper.
+bool nav_freeze_enabled(void);
+void nav_toggle_freeze(void);
+void nav_set_output_dirty(bool dirty);
+
 // Toggle between supported navigation parsers.
 void nav_set_mode(nav_mode_t mode);
 nav_mode_t nav_current_mode(void);
