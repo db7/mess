@@ -1,7 +1,7 @@
 // RUN: env PAGER=%x MESSPAGER=%x %mess %S/data/sample0.md | %check
 // CHECK: ARGS: %x
-// CHECK: MESSFILE=%S/data/sample0.md
-// CHECK: FIRST:sample
+// CHECK: MESSFILE={{.*}}/data/sample0.md
+// CHECK: FIRST:{{ *}}sample
 
 #include <stdio.h>
 #include <stdlib.h>

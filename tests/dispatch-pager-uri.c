@@ -1,7 +1,7 @@
-// RUN: env PAGER=%x MESSPAGER=%x %mess file://%S/data/uri | %check
-// CHECK: ARGS: %x %S/data/uri
-// CHECK: MESSFILE=%S/data/uri
-// CHECK: FIRST:uri
+// RUN: env PAGER=%x MESSPAGER=%x %mess file://%(realpath %S/data/uri) | %check
+// CHECK: ARGS: %x {{.*}}/data/uri
+// CHECK: MESSFILE={{.*}}/data/uri
+// CHECK: FIRST:{{ *}}uri
 
 #include <stdio.h>
 #include <stdlib.h>

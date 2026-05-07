@@ -60,10 +60,10 @@ coverage: clean
 	@${MAKE} CFLAGS="${CFLAGS.cov}" LDFLAGS="${LDFLAGS.cov}" all
 
 version.h: version.h.in
-	./versionize.sh version.h.in > $@
+	scripts/versionize.sh -r version.h.in > $@
 
 mess.1: mess.1.in
-	./versionize.sh mess.1.in > $@
+	scripts/versionize.sh -r mess.1.in > $@
 
 mess: ${OBJS}
 	${CC} ${CFLAGS} ${CPPFLAGS} -o $@ ${OBJS} ${LDFLAGS} ${LDLIBS}
