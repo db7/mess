@@ -7,10 +7,11 @@ CFLAGS+=		-I${ROOTDIR}
 TARGETS=
 
 TARGETS+=		run_offscr.bin
-DEPS.run_offscr=	${ROOTDIR}/offscr.o
+DEPS.run_offscr=	${ROOTDIR}/offscr.o ${ROOTDIR}/strbuf.o ${ROOTDIR}/log.o
 
 TARGETS+=		run_links.bin
-DEPS.run_links=		${ROOTDIR}/links.o ${ROOTDIR}/offscr.o
+DEPS.run_links=		${ROOTDIR}/links.o ${ROOTDIR}/offscr.o \
+			${ROOTDIR}/strbuf.o ${ROOTDIR}/log.o
 
 all: ${TARGETS}
 

@@ -1,6 +1,6 @@
-#include "links.h"
-#include "nav.h"
+#include "defs.h"
 #include "log.h"
+#include "nav.h"
 #include "offscr.h"
 #include "pager.h"
 #include "readq.h"
@@ -30,42 +30,388 @@
 #ifndef READQ_SIZE
 #define READQ_SIZE 4096
 #endif
+#define MESS_ENTER_HOTKEY '\t'
 
 static bool set_raw_mode_(int fd, struct termios *out_prev);
-static void restore_terminal_(int fd, const struct termios *term);
 static void change_terminal_size_(int fd, int rows, int cols);
 static void get_terminal_size_(int fd, int *rows, int *cols);
 static bool handle_tty_pass_mode_(int child_fd, struct readq *tty_q,
                                   int tty_fd);
-static bool handle_child_output_(struct readq *child_q);
-static bool handle_upstream_input_(int child_fd, int upstream_fd, bool *done);
 static bool install_winch_(void);
 static void handle_sigint_(int sig);
 static void handle_winch_signal_(int sig);
-static char *capture_stdin_to_temp_(void);
-static void cleanup_capture_path_(char *path);
-static bool append_arg_(char ***argvp, const char *arg);
+static void exec_subpager_(void);
 static bool pager_enter_nav_mode_(int child_fd, int tty_fd);
+int parent_run_(pid_t child_pid, int master_fd, int tty_fd);
+
+// These global variables are only used because we have to handle signal
 
 // File descriptor used to propagate SIGWINCH notifications via a pipe.
 static int winch_fd_;
-// Saved terminal attributes so raw mode can be undone on exit.
-static struct termios saved_term_;
-// Flag indicating whether mess currently owns the terminal in raw mode.
-static bool term_in_raw_;
+
 // Counts SIGINT deliveries so we can escalate after repeated interrupts.
 static volatile sig_atomic_t sigint_count_;
+
 // PID of the forked pager child process, or -1 when inactive.
 static pid_t pager_child_pid_ = -1;
-static struct offscr_ctx *offscr_ctx_;
+
+// navigation global
+static bool pager_quit_requested_;
 static struct nav *pager_nav_;
 
-#define MESS_ENTER_HOTKEY '\t'
+// -----------------------------------------------------------------------------
+// Pager wrapper entry point
+// -----------------------------------------------------------------------------
 
-// Parse the pager command from environment and split it into argv.
-static int
-build_pager_command_(char ***argv_out)
+int
+pager_run(int parse_flags)
 {
+    (void)parse_flags;
+    // stdin stays a TTY when mess runs without upstream piping (e.g. invoked
+    // directly from the shell or as a pager with the caller leaving stdin on
+    // the controlling terminal), so we still need to handle that path.
+    if (!isatty(STDIN_FILENO) && !isatty(STDOUT_FILENO))
+        exec_subpager_();
+
+    int master_fd = -1;
+    int slave_fd  = -1;
+    int tty_fd    = -1;
+    int rc        = -1;
+    struct termios prev_term;
+    bool raw_mode_set = false;
+
+
+#ifdef __linux__
+    master_fd = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master_fd < 0 || grantpt(master_fd) < 0 || unlockpt(master_fd) < 0) {
+        perror("posix_openpt");
+        return -1;
+    }
+#else
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1) {
+        perror("ioctl TIOCGWINSZ");
+        goto out;
+    }
+    if (openpty(&master_fd, &slave_fd, NULL, NULL, &ws) == -1) {
+        perror("openpty");
+        goto out;
+    }
+#endif
+
+    // save master_fd, so that we can tell the child when to resize
+    winch_fd_ = master_fd;
+
+    // this needs to be given to the child
+    tty_fd = open("/dev/tty", O_RDWR);
+    if (tty_fd == -1 || !set_raw_mode_(tty_fd, &prev_term)) {
+        perror("open /dev/tty");
+        goto out;
+    }
+
+    // when 2 cntrl-C, abort. But WHY initialize it here. This function can run
+    // only once per process.
+    sigint_count_ = 0;
+    signal(SIGINT, handle_sigint_);
+    install_winch_();
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("fork");
+        goto out;
+    }
+
+    if (pid == 0) {
+#ifdef __linux__
+        slave_fd = open(ptsname(master_fd), O_RDWR);
+        if (slave_fd < 0)
+            _exit(1);
+#endif
+        if (setsid() == -1)
+            _exit(1);
+        if (ioctl(slave_fd, TIOCSCTTY, 0) == -1)
+            _exit(1);
+        // stdin is the same from the parent
+        dup2(slave_fd, STDOUT_FILENO);
+        dup2(slave_fd, STDERR_FILENO);
+        close(slave_fd);
+        close(master_fd);
+        exec_subpager_();
+        unreachable();
+    }
+
+#ifndef __linux__
+    close(slave_fd);
+    slave_fd = -1;
+#endif
+
+    rc = parent_run_(pid, master_fd, tty_fd);
+out:
+    if (tty_fd != -1 && raw_mode_set)
+        tcsetattr(tty_fd, TCSAFLUSH, &prev_term);
+    if (tty_fd != -1)
+        close(tty_fd);
+    if (master_fd != -1)
+        close(master_fd);
+#ifndef __linux__
+    if (slave_fd != -1)
+        close(slave_fd);
+#endif
+    return rc;
+}
+
+// -----------------------------------------------------------------------------
+// Parent functions
+// -----------------------------------------------------------------------------
+int
+parent_run_(pid_t child_pid, int master_fd, int tty_fd)
+
+{
+    struct nav_opts nav_opts = {
+        .debug_fd = STDERR_FILENO,
+    };
+    pager_nav_ = nav_create(&nav_opts);
+    if (!pager_nav_) {
+        perror("nav_create");
+        return -1;
+    }
+
+    // do I need this initialization?
+    pager_quit_requested_ = false;
+
+    // we get input from tty and from the stdout of the child
+    struct readq child_q;
+    struct readq tty_q;
+    readq_init(&child_q, master_fd);
+    readq_init(&tty_q, tty_fd);
+
+    fd_set readfds;
+    int max_fd = master_fd;
+    if (tty_fd > max_fd)
+        max_fd = tty_fd;
+
+    int err    = -1; // assume something bad will happen
+    int status = 0;
+
+    while (true) {
+        int rv = waitpid(child_pid, &status, WNOHANG);
+        if (rv == child_pid)
+            break;
+
+        FD_ZERO(&readfds);
+        FD_SET(tty_fd, &readfds);
+        FD_SET(master_fd, &readfds);
+
+        int sel = select(max_fd + 1, &readfds, NULL, NULL, NULL);
+        if (sel == -1) {
+            if (errno == EINTR)
+                continue;
+            perror("select");
+            goto out;
+        }
+
+        if (FD_ISSET(tty_fd, &readfds)) {
+            if (!handle_tty_pass_mode_(master_fd, &tty_q, tty_fd))
+                goto out;
+        }
+
+        if (FD_ISSET(master_fd, &readfds)) {
+            if (readq_refill(&child_q) &&
+                write(STDOUT_FILENO, readq_data(&child_q),
+                      readq_len(&child_q)) == -1) {
+                perror("write stdout");
+                goto out;
+            }
+            readq_clear(&child_q);
+        }
+    }
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
+        fprintf(stderr, "something\n");
+    else if (WIFSIGNALED(status))
+        fprintf(stderr, "something\n");
+    else // only get here if child exited with success
+        err = 0;
+
+out:
+    nav_destroy(pager_nav_);
+    return err;
+}
+
+
+// Process keyboard input from the controlling terminal.
+static bool
+handle_tty_pass_mode_(int child_fd, struct readq *tty_queue, int tty_fd)
+{
+    if (pager_quit_requested_)
+        return true;
+
+    if (!readq_refill(tty_queue))
+        return true;
+
+    bool trigger_nav = false;
+    while (readq_len(tty_queue) > 0) {
+        int ch = readq_get_next(tty_queue);
+        if (ch < 0)
+            break;
+        if (ch == MESS_ENTER_HOTKEY) {
+            trigger_nav = true;
+            break;
+        }
+        char out = (char)ch;
+        if (write(child_fd, &out, 1) == -1) {
+            perror("write to child");
+            return false;
+        }
+    }
+
+    if (trigger_nav) {
+        if (!pager_enter_nav_mode_(child_fd, tty_fd))
+            return false;
+    }
+
+    readq_clear(tty_queue);
+    return true;
+}
+
+static int
+drain_and_clear_fd_(int fd)
+{
+    struct offscr_ctx *ctx = offscr_new(&(struct offscr_opts){
+        .drain                 = true,
+        .max_bytes             = 0,
+        .first_byte_timeout_ms = 50,
+        .next_byte_timeout_ms  = 20,
+        .max_lines             = 0,
+    });
+    if (ctx == 0) {
+        perror("offscr_new");
+        return -1;
+    }
+    offscr_capture(ctx, fd);
+    offscr_free(ctx);
+    const char ctrl_l = '\f';
+    if (write(fd, &ctrl_l, 1) == -1) {
+        perror("write Ctrl-L");
+        return -1;
+    }
+    return 0;
+}
+
+static bool
+pager_enter_nav_mode_(int child_fd, int tty_fd)
+{
+    if (!pager_nav_) {
+        fprintf(stderr, "navigation unavailable\n");
+        return false;
+    }
+    log_debug("nav: entering mode");
+    if (drain_and_clear_fd_(child_fd) == -1)
+        return -1;
+
+    struct offscr_ctx *offscr_ctx_ = offscr_new(&(struct offscr_opts){
+        .max_bytes             = 0,
+        .first_byte_timeout_ms = 1000,
+        .next_byte_timeout_ms  = 200,
+        .max_lines             = 0,
+    });
+    if (offscr_ctx_ == NULL) {
+        perror("offscr_new");
+        return false;
+    }
+
+    struct offscr_view view = {0};
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        if (offscr_capture(offscr_ctx_, child_fd) < 0) {
+            perror("offscr_capture");
+            return false;
+        }
+        offscr_forget_first_row(offscr_ctx_);
+        view = offscr_view(offscr_ctx_);
+        if (view.len > 0)
+            break;
+        usleep(50000);
+    }
+    if (!view.data || view.len == 0)
+        return false;
+
+    log_debug("nav: captured view");
+    for (size_t r = 0; r < 3; ++r) {
+        char *row = offscr_extract(&view, r);
+        if (!row)
+            break;
+        log_debug("snap row %zu: %s", r, row);
+        free(row);
+    }
+    struct readq input;
+    readq_init(&input, tty_fd);
+
+    log_debug("nav: tty_fd=%d", tty_fd);
+    if (fcntl(tty_fd, F_GETFL) == -1) {
+        log_debug("nav: invalid tty_fd (%d errno=%d)", tty_fd, errno);
+        return false;
+    }
+    log_debug("nav: view size=%zu", view.len);
+    size_t dump_len = view.len < 128 ? view.len : 128;
+    if (dump_len > 0) {
+        char hex[(3 * 128) + 1];
+        size_t pos = 0;
+        for (size_t i = 0; i < dump_len && pos + 3 < sizeof(hex); ++i) {
+            int written = snprintf(hex + pos, sizeof(hex) - pos, "%02x ",
+                                   (unsigned char)view.data[i]);
+            if (written < 0)
+                break;
+            pos += (size_t)written;
+        }
+        if (pos > 0 && hex[pos - 1] == ' ')
+            hex[pos - 1] = '\0';
+        else
+            hex[pos] = '\0';
+        log_debug("nav: view head (%zu bytes): %s", dump_len, hex);
+    }
+    int rows = 0;
+    int cols = 0;
+    get_terminal_size_(STDOUT_FILENO, &rows, &cols);
+    size_t width = cols > 0 ? (size_t)cols : 0;
+
+    log_debug("nav: running nav_run");
+    nav_result_t rc =
+        nav_run(pager_nav_, &view, &input, STDOUT_FILENO, width, true);
+    switch (rc) {
+        case NAV_RESULT_STOP:
+            log_debug("nav: stop");
+            break;
+        case NAV_RESULT_REFRESH:
+            log_debug("nav: refresh");
+            break;
+        case NAV_RESULT_CANCELLED:
+            log_debug("nav: canceled");
+            break;
+        case NAV_RESULT_QUIT: {
+            log_debug("nav: quit");
+            pager_quit_requested_ = true;
+            const char quit       = 'q';
+            if (write(child_fd, &quit, 1) == -1)
+                perror("write quit");
+            break;
+        }
+        default:
+            log_debug("nav: error");
+            break;
+    }
+    sigint_count_ = 0;
+    return rc != NAV_RESULT_ERROR;
+}
+
+// -----------------------------------------------------------------------------
+// Subpager execution
+// -----------------------------------------------------------------------------
+
+// Execute the pager when mess is fed through a pipeline.
+static void
+exec_subpager_(void)
+{
+#if 0
     const char *cmd = getenv("MESSPAGER");
     if (!cmd || !cmd[0])
         cmd = getenv("PAGER");
@@ -96,264 +442,14 @@ build_pager_command_(char ***argv_out)
     argv[count] = NULL;
 
     wordfree(&we);
-    *argv_out = argv;
-    return 0;
+#endif
+    execlp("less", "less", "-R", 0);
+    _exit(127);
 }
 
-// Release the argv array built by build_pager_command_().
-static void
-free_pager_command_(char **argv)
-{
-    if (!argv)
-        return;
-    for (size_t i = 0; argv[i]; ++i)
-        free(argv[i]);
-    free(argv);
-}
-
-static int pager_run_interactive_(char **pager_cmd, bool forward_stdin);
-static int pager_run_piped_(char **pager_cmd);
-
-int
-pager_run(int parse_flags)
-{
-    (void)parse_flags;
-    // stdin stays a TTY when mess runs without upstream piping (e.g. invoked
-    // directly from the shell or as a pager with the caller leaving stdin on
-    // the controlling terminal), so we still need to handle that path.
-    bool stdin_is_tty  = isatty(STDIN_FILENO);
-    char *capture_path = NULL;
-    if (!stdin_is_tty)
-        capture_path = capture_stdin_to_temp_();
-
-    char **pager_cmd = NULL;
-    if (build_pager_command_(&pager_cmd) != 0)
-        return -1;
-
-    struct nav_opts nav_opts = {
-        .debug_fd = STDERR_FILENO,
-    };
-    pager_nav_ = nav_create(&nav_opts);
-    if (!pager_nav_) {
-        free_pager_command_(pager_cmd);
-        cleanup_capture_path_(capture_path);
-        return -1;
-    }
-
-    if (capture_path) {
-        if (!append_arg_(&pager_cmd, capture_path)) {
-            cleanup_capture_path_(capture_path);
-            free_pager_command_(pager_cmd);
-            return -1;
-        }
-    }
-
-    bool interactive = stdin_is_tty || (capture_path && isatty(STDOUT_FILENO));
-    bool forward_stdin = (!stdin_is_tty && capture_path == NULL);
-    int rc = interactive ? pager_run_interactive_(pager_cmd, forward_stdin) :
-                           pager_run_piped_(pager_cmd);
-    free_pager_command_(pager_cmd);
-    nav_destroy(pager_nav_);
-    pager_nav_ = NULL;
-    cleanup_capture_path_(capture_path);
-    return rc;
-}
-// Drive the pager with a pseudo-tty when mess runs interactively.
-static int
-pager_run_interactive_(char **pager_cmd, bool forward_stdin)
-{
-    int master_fd;
-    int slave_fd = -1;
-#ifdef __linux__
-    master_fd = posix_openpt(O_RDWR | O_NOCTTY);
-    if (master_fd < 0 || grantpt(master_fd) < 0 || unlockpt(master_fd) < 0) {
-        perror("posix_openpt");
-        free_pager_command_(pager_cmd);
-        return -1;
-    }
-#else
-    struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1) {
-        perror("ioctl TIOCGWINSZ");
-        free_pager_command_(pager_cmd);
-        return -1;
-    }
-    if (openpty(&master_fd, &slave_fd, NULL, NULL, &ws) == -1) {
-        perror("openpty");
-        free_pager_command_(pager_cmd);
-        return -1;
-    }
-#endif
-
-    winch_fd_ = master_fd;
-
-    struct termios prev_term;
-    int tty_fd = open("/dev/tty", O_RDWR);
-    if (tty_fd == -1 || !set_raw_mode_(tty_fd, &prev_term)) {
-        perror("open /dev/tty");
-        close(master_fd);
-#ifndef __linux__
-        close(slave_fd);
-#endif
-        free_pager_command_(pager_cmd);
-        return -1;
-    }
-    saved_term_   = prev_term;
-    term_in_raw_  = true;
-    sigint_count_ = 0;
-    signal(SIGINT, handle_sigint_);
-    install_winch_();
-
-    pid_t pid = fork();
-    if (pid == -1) {
-        perror("fork");
-        restore_terminal_(tty_fd, &saved_term_);
-        close(tty_fd);
-        close(master_fd);
-#ifndef __linux__
-        close(slave_fd);
-#endif
-        offscr_free(offscr_ctx_);
-        offscr_ctx_ = NULL;
-        free_pager_command_(pager_cmd);
-        return -1;
-    }
-
-    if (pid == 0) {
-#ifdef __linux__
-        slave_fd = open(ptsname(master_fd), O_RDWR);
-        if (slave_fd < 0)
-            _exit(1);
-#endif
-        if (setsid() == -1)
-            _exit(1);
-        if (ioctl(slave_fd, TIOCSCTTY, 0) == -1)
-            _exit(1);
-        dup2(slave_fd, STDIN_FILENO);
-        dup2(slave_fd, STDOUT_FILENO);
-        dup2(slave_fd, STDERR_FILENO);
-        close(slave_fd);
-        close(master_fd);
-        execvp(pager_cmd[0], pager_cmd);
-        perror("exec pager");
-        _exit(127);
-    }
-
-#ifndef __linux__
-    close(slave_fd);
-#endif
-
-    offscr_ctx_ = offscr_new(NULL);
-    if (offscr_ctx_ == NULL) {
-        perror("offscr_new");
-        restore_terminal_(tty_fd, &saved_term_);
-        close(tty_fd);
-        close(master_fd);
-#ifndef __linux__
-        close(slave_fd);
-#endif
-        free_pager_command_(pager_cmd);
-        return -1;
-    }
-    struct readq child_q;
-    struct readq tty_q;
-    readq_init(&child_q, master_fd);
-    readq_init(&tty_q, tty_fd);
-    int upstream_fd    = forward_stdin ? STDIN_FILENO : -1;
-    bool upstream_done = false;
-
-    fd_set readfds;
-    int max_fd = master_fd;
-    if (tty_fd > max_fd)
-        max_fd = tty_fd;
-    if (upstream_fd > max_fd)
-        max_fd = upstream_fd;
-    int err    = 0;
-    int status = 0;
-
-    while (true) {
-        int rv = waitpid(pid, &status, WNOHANG);
-        if (rv == pid)
-            break;
-
-        FD_ZERO(&readfds);
-        FD_SET(tty_fd, &readfds);
-        FD_SET(master_fd, &readfds);
-        if (upstream_fd != -1 && !upstream_done)
-            FD_SET(upstream_fd, &readfds);
-        int sel = select(max_fd + 1, &readfds, NULL, NULL, NULL);
-        if (sel == -1) {
-            if (errno == EINTR)
-                continue;
-            perror("select");
-            err = 1;
-            break;
-        }
-
-        if (FD_ISSET(tty_fd, &readfds)) {
-            if (!handle_tty_pass_mode_(master_fd, &tty_q, tty_fd)) {
-                err = 1;
-                break;
-            }
-        }
-
-        if (FD_ISSET(master_fd, &readfds)) {
-            if (!handle_child_output_(&child_q)) {
-                err = 1;
-                break;
-            }
-        }
-
-        if (upstream_fd != -1 && !upstream_done &&
-            FD_ISSET(upstream_fd, &readfds)) {
-            if (!handle_upstream_input_(master_fd, upstream_fd,
-                                        &upstream_done)) {
-                err = 1;
-                break;
-            }
-            if (upstream_done)
-                upstream_fd = -1;
-        }
-    }
-
-    if (!err && WIFEXITED(status) && WEXITSTATUS(status) != 0)
-        err = 1;
-    if (WIFSIGNALED(status))
-        err = 1;
-
-    if (term_in_raw_)
-        restore_terminal_(tty_fd, &saved_term_);
-    close(tty_fd);
-    close(master_fd);
-    offscr_free(offscr_ctx_);
-    offscr_ctx_ = NULL;
-    return err ? -1 : 0;
-}
-
-// Execute the pager when mess is fed through a pipeline.
-static int
-pager_run_piped_(char **pager_cmd)
-{
-    pid_t pid = fork();
-    if (pid == -1) {
-        perror("fork");
-        return -1;
-    }
-
-    if (pid == 0) {
-        execvp(pager_cmd[0], pager_cmd);
-        _exit(127);
-    }
-
-    int status = 0;
-    if (waitpid(pid, &status, 0) == -1)
-        return -1;
-    if (WIFEXITED(status))
-        return WEXITSTATUS(status);
-    if (WIFSIGNALED(status))
-        return 128 + WTERMSIG(status);
-    return -1;
-}
+// -----------------------------------------------------------------------------
+// Terminal mode and signal handling functions
+// -----------------------------------------------------------------------------
 
 // Switch the tty to raw mode while remembering the previous settings.
 static bool
@@ -371,15 +467,6 @@ set_raw_mode_(int fd, struct termios *out_prev)
     term.c_cc[VMIN]  = 1;
     term.c_cc[VTIME] = 0;
     return tcsetattr(fd, TCSANOW, &term) != -1;
-}
-
-// Restore canonical terminal settings once raw mode is no longer needed.
-static void
-restore_terminal_(int fd, const struct termios *term)
-{
-    if (term)
-        tcsetattr(fd, TCSAFLUSH, term);
-    term_in_raw_ = false;
 }
 
 // Force the child pseudo-tty to adopt the provided dimensions.
@@ -441,202 +528,4 @@ handle_winch_signal_(int sig)
         change_terminal_size_(winch_fd_, rows, cols);
     if (pager_child_pid_ > 0)
         (void)kill(pager_child_pid_, SIGWINCH);
-}
-
-// Process keyboard input from the controlling terminal.
-static bool
-handle_tty_pass_mode_(int child_fd, struct readq *tty_queue, int tty_fd)
-{
-    printf("hi\n");
-    if (!readq_refill(tty_queue))
-        return true;
-
-    while (readq_available_bytes(tty_queue) > 0) {
-        int ch = readq_get_next(tty_queue);
-        if (ch < 0)
-            break;
-        if (ch == MESS_ENTER_HOTKEY) {
-            if (!pager_enter_nav_mode_(child_fd, tty_fd))
-                return false;
-            return true;
-        }
-        char out = (char)ch;
-        if (write(child_fd, &out, 1) == -1) {
-            perror("write to child");
-            return false;
-        }
-    }
-
-    tty_queue->start = tty_queue->end = 0;
-    return true;
-}
-
-// Consume bytes produced by the child process and forward to stdout.
-static bool
-handle_child_output_(struct readq *bq)
-{
-    if (!readq_refill(bq))
-        return true;
-
-    size_t len = readq_available_bytes(bq);
-    if (len > 0) {
-        const char *data = bq->buffer + bq->start;
-        if (write(STDOUT_FILENO, data, len) == -1) {
-            perror("write stdout");
-            return false;
-        }
-    }
-    bq->start = bq->end = 0;
-    return true;
-}
-
-// Forward data from the upstream fd into the child PTY, tracking EOF.
-static bool
-handle_upstream_input_(int child_fd, int upstream_fd, bool *done)
-{
-    char buffer[READQ_SIZE];
-    ssize_t n = read(upstream_fd, buffer, sizeof(buffer));
-    if (n > 0) {
-        ssize_t written = 0;
-        while (written < n) {
-            ssize_t w =
-                write(child_fd, buffer + written, (size_t)(n - written));
-            if (w == -1) {
-                if (errno == EINTR)
-                    continue;
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    continue;
-                perror("write upstream");
-                return false;
-            }
-            written += w;
-        }
-        return true;
-    }
-    if (n == 0) {
-        const char eot = 4;
-        (void)write(child_fd, &eot, 1);
-        if (done)
-            *done = true;
-        return true;
-    }
-    if (errno == EINTR || errno == EAGAIN)
-        return true;
-    perror("read upstream");
-    return false;
-}
-
-static bool
-pager_enter_nav_mode_(int child_fd, int tty_fd)
-{
-    if (!pager_nav_) {
-        fprintf(stderr, "navigation unavailable\n");
-        return false;
-    }
-    if (offscr_ctx_ == NULL)
-        return false;
-
-    log_debugln("nav: entering mode");
-    const char ctrl_l = '\f';
-    if (write(child_fd, &ctrl_l, 1) == -1) {
-        perror("write Ctrl-L");
-        return false;
-    }
-
-    if (offscr_capture(offscr_ctx_, child_fd) < 0) {
-        perror("offscr_capture");
-        return false;
-    }
-
-    log_debugln("nav: captured view");
-    struct offscr_view view = offscr_view(offscr_ctx_);
-    struct readq input;
-    readq_init(&input, tty_fd);
-
-    log_debugln("nav: running nav_run");
-    nav_result_t rc = nav_run(pager_nav_, &view, &input, tty_fd);
-    switch (rc) {
-    case NAV_RESULT_STOP:
-        log_debugln("nav: stop");
-        break;
-    case NAV_RESULT_REFRESH:
-        log_debugln("nav: refresh");
-        break;
-    case NAV_RESULT_CANCELLED:
-        log_debugln("nav: cancelled");
-        break;
-    default:
-        log_debugln("nav: error");
-        break;
-    }
-    sigint_count_   = 0;
-    return rc != NAV_RESULT_ERROR;
-}
-
-// Persist stdin to a temporary file so the pager can re-open it later.
-static char *
-capture_stdin_to_temp_(void)
-{
-    static const char tpl[] = "/tmp/mess-input-XXXXXX";
-    char path[sizeof(tpl)];
-    memcpy(path, tpl, sizeof(tpl));
-
-    int fd = mkstemp(path);
-    if (fd == -1)
-        return NULL;
-
-    char buffer[8192];
-    ssize_t n;
-    while ((n = read(STDIN_FILENO, buffer, sizeof(buffer))) > 0) {
-        ssize_t written = 0;
-        while (written < n) {
-            ssize_t w = write(fd, buffer + written, (size_t)(n - written));
-            if (w == -1) {
-                if (errno == EINTR)
-                    continue;
-                goto fail;
-            }
-            written += w;
-        }
-    }
-    if (n == -1)
-        goto fail;
-    if (lseek(fd, 0, SEEK_SET) == -1)
-        goto fail;
-    close(fd);
-    return strdup(path);
-fail:
-    close(fd);
-    unlink(path);
-    return NULL;
-}
-
-// Remove and free a temporary capture path created by capture_stdin_to_temp_().
-static void
-cleanup_capture_path_(char *path)
-{
-    if (!path)
-        return;
-    unlink(path);
-    free(path);
-}
-
-// Append a string to a NULL-terminated argv array.
-static bool
-append_arg_(char ***argvp, const char *arg)
-{
-    if (!argvp || !*argvp || !arg)
-        return false;
-    size_t count = 0;
-    while ((*argvp)[count])
-        count++;
-    char **newv = realloc(*argvp, (count + 2) * sizeof(char *));
-    if (!newv)
-        return false;
-    newv[count] = strdup(arg);
-    if (!newv[count])
-        return false;
-    newv[count + 1] = NULL;
-    *argvp          = newv;
-    return true;
 }

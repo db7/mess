@@ -1,3 +1,4 @@
+#include "log.h"
 #include "offscr.h"
 #include "strbuf.h"
 
@@ -19,7 +20,11 @@ struct offscr_ctx {
 static const size_t default_soft_limit_ = 64 * 1024;
 
 /* Default timeout (ms) used when the caller does not override it. */
-static const unsigned int default_timeout_ms_ = 250;
+static const unsigned int default_first_timeout_ms_ = 1000;
+static const unsigned int default_next_timeout_ms_  = 250;
+
+static int is_csi_cursor_movement_(unsigned char terminator);
+static int poll_timeout_value_(unsigned int timeout_ms);
 
 /*
  * Reason: Clamp the number of bytes copied based on the configured limit.
@@ -36,6 +41,43 @@ allowed_copy_size_(const struct offscr_ctx *ctx, size_t incoming)
     return incoming > remaining ? remaining : incoming;
 }
 
+static size_t
+strip_cursor_movements_(char *chunk, size_t len)
+{
+    size_t in  = 0;
+    size_t out = 0;
+    while (in < len) {
+        if (chunk[in] == '\033' && in + 1 < len && chunk[in + 1] == '[') {
+            size_t seq_end    = in + 2;
+            int complete      = 0;
+            int drop_sequence = 0;
+            while (seq_end < len) {
+                unsigned char term = (unsigned char)chunk[seq_end++];
+                if (term >= '@' && term <= '~') {
+                    complete = 1;
+                    if (is_csi_cursor_movement_(term))
+                        drop_sequence = 1;
+                    break;
+                }
+            }
+            if (!complete) {
+                while (in < len)
+                    chunk[out++] = chunk[in++];
+                break;
+            }
+            if (drop_sequence) {
+                in = seq_end;
+                continue;
+            }
+            while (in < seq_end)
+                chunk[out++] = chunk[in++];
+            continue;
+        }
+        chunk[out++] = chunk[in++];
+    }
+    return out;
+}
+
 struct offscr_ctx *
 offscr_new(const struct offscr_opts *opts)
 {
@@ -43,40 +85,48 @@ offscr_new(const struct offscr_opts *opts)
     if (ctx == NULL)
         return NULL;
 
-    size_t max_bytes     = default_soft_limit_;
-    unsigned int timeout = default_timeout_ms_;
-    size_t max_lines     = 0;
-
-    if (opts != NULL) {
+    size_t max_bytes        = default_soft_limit_;
+    unsigned int first_wait = default_first_timeout_ms_;
+    unsigned int next_wait  = default_next_timeout_ms_;
+    size_t max_lines        = 0;
+    bool drain              = false;
+    if (opts) {
         if (opts->max_bytes != 0)
             max_bytes = opts->max_bytes;
-        if (opts->capture_timeout_ms != 0)
-            timeout = opts->capture_timeout_ms;
+        if (opts->first_byte_timeout_ms != 0)
+            first_wait = opts->first_byte_timeout_ms;
+        if (opts->next_byte_timeout_ms != 0)
+            next_wait = opts->next_byte_timeout_ms;
         max_lines = opts->max_lines;
+        drain     = opts->drain;
     }
-
-    ctx->opts.max_bytes          = max_bytes;
-    ctx->opts.capture_timeout_ms = timeout;
-    ctx->opts.max_lines          = max_lines;
-    ctx->lines                   = 0;
+    ctx->opts.max_bytes             = max_bytes;
+    ctx->opts.first_byte_timeout_ms = first_wait;
+    ctx->opts.next_byte_timeout_ms  = next_wait;
+    ctx->opts.max_lines             = max_lines;
+    ctx->opts.drain                 = drain;
+    ctx->lines                      = 0;
     strbuf_init(&ctx->buf, 0);
 
     return ctx;
 }
 
 int
-offscr_capture(struct offscr_ctx *ctx, int child_fd)
+offscr_capture(struct offscr_ctx *ctx, int fd)
 {
-    if (ctx == NULL || child_fd < 0) {
+    if (ctx == NULL || fd < 0) {
         errno = EINVAL;
         return -1;
     }
 
     struct pollfd pfd = {
-        .fd     = child_fd,
+        .fd     = fd,
         .events = POLLIN | POLLHUP | POLLERR,
     };
-    int timeout = (int)ctx->opts.capture_timeout_ms;
+    const int first_timeout = poll_timeout_value_(ctx->opts.first_byte_timeout_ms);
+    const int next_timeout  = poll_timeout_value_(ctx->opts.next_byte_timeout_ms);
+    const bool draining     = ctx->opts.drain;
+    int timeout             = first_timeout;
 
     int saw_data = 0;
     char chunk[4096];
@@ -92,7 +142,7 @@ offscr_capture(struct offscr_ctx *ctx, int child_fd)
             return saw_data ? OFFSCR_CAPTURE_OK : OFFSCR_CAPTURE_TIMEOUT;
         }
 
-        ssize_t nread = read(child_fd, chunk, sizeof(chunk));
+        ssize_t nread = read(fd, chunk, sizeof(chunk));
         if (nread == 0) {
             return saw_data ? OFFSCR_CAPTURE_OK : OFFSCR_CAPTURE_TIMEOUT;
         }
@@ -105,12 +155,20 @@ offscr_capture(struct offscr_ctx *ctx, int child_fd)
             return -1;
         }
 
+        size_t filtered = strip_cursor_movements_(chunk, (size_t)nread);
+        if (filtered == 0) {
+            timeout = saw_data ? next_timeout : first_timeout;
+            continue;
+        }
+        nread = (ssize_t)filtered;
+
         if (!saw_data) {
             strbuf_reset(&ctx->buf);
             ctx->truncated = 0;
             ctx->lines     = 0;
+            saw_data       = 1;
+            timeout        = next_timeout;
         }
-        saw_data = 1;
 
         size_t copy_len = allowed_copy_size_(ctx, (size_t)nread);
         size_t lines    = ctx->lines;
@@ -134,7 +192,7 @@ offscr_capture(struct offscr_ctx *ctx, int child_fd)
             copy_len = i;
         }
 
-        if (copy_len > 0) {
+        if (copy_len > 0 && !draining) {
             if (strbuf_append(&ctx->buf, chunk, copy_len) != 0)
                 return -1;
         }
@@ -148,7 +206,7 @@ offscr_capture(struct offscr_ctx *ctx, int child_fd)
         if (ctx->truncated)
             return OFFSCR_CAPTURE_OK;
 
-        timeout = (int)ctx->opts.capture_timeout_ms;
+        timeout = next_timeout;
     }
 }
 
@@ -199,12 +257,13 @@ offscr_extract(const struct offscr_view *view, size_t target_row)
     if (view == NULL || view->data == NULL)
         return NULL;
 
-    size_t row = 0;
-    size_t idx = 0;
+    size_t row         = 0;
+    size_t idx         = 0;
     struct strbuf line = STRBUF_INIT;
     if (strbuf_reserve(&line, 0) != 0)
         return NULL;
-    int seen_cursor = 0;
+
+    int warned_cursor = 0;
 
     while (idx < view->len) {
         unsigned char ch = (unsigned char)view->data[idx];
@@ -226,8 +285,13 @@ offscr_extract(const struct offscr_view *view, size_t target_row)
             continue;
         }
         if (ch == '\r') {
-            if (row == target_row)
+            if (row == target_row) {
+                if (idx + 1 < view->len && view->data[idx + 1] == '\n') {
+                    idx++;
+                    continue;
+                }
                 strbuf_reset(&line);
+            }
             idx++;
             continue;
         }
@@ -264,15 +328,21 @@ offscr_extract(const struct offscr_view *view, size_t target_row)
             } else {
                 seq_end = idx + 1;
             }
-            if (row == target_row && !cursor) {
+            if (row == target_row) {
+                if (cursor) {
+                    if (!warned_cursor) {
+                        log_warn("offscr: ignoring cursor movement on row %zu",
+                                 target_row);
+                        warned_cursor = 1;
+                    }
+                    idx = seq_end;
+                    continue;
+                }
                 if (strbuf_append(&line, view->data + seq_start,
                                   seq_end - seq_start) != 0) {
                     strbuf_free(&line);
                     return NULL;
                 }
-            } else if (row == target_row && cursor) {
-                seen_cursor = 1;
-                break;
             }
             idx = seq_end;
             continue;
@@ -286,11 +356,72 @@ offscr_extract(const struct offscr_view *view, size_t target_row)
         idx++;
     }
 
-    if (row < target_row || seen_cursor) {
+    if (row < target_row) {
         strbuf_free(&line);
         return NULL;
     }
     return strbuf_detach(&line);
+}
+
+void
+offscr_dump(const struct offscr_view *view, size_t max_rows)
+{
+    if (view == NULL || view->data == NULL) {
+        log_debug("offscr: empty view");
+        return;
+    }
+    if (max_rows == 0)
+        max_rows = view->len;
+
+    size_t row = 0;
+    int dumped = 0;
+    while (row < max_rows) {
+        char *line = offscr_extract(view, row);
+        if (line == NULL)
+            break;
+        log_debug("offscr: row %zu: %s", row, line);
+        free(line);
+        dumped = 1;
+        row++;
+    }
+    if (!dumped)
+        log_debug("offscr: (no rows dumped)");
+}
+
+void
+offscr_forget_first_row(struct offscr_ctx *ctx)
+{
+    if (ctx == NULL || ctx->buf.data == NULL || ctx->buf.len == 0)
+        return;
+
+    size_t len   = ctx->buf.len;
+    char *data   = ctx->buf.data;
+    size_t start = 0;
+    while (start < len) {
+        char ch = data[start++];
+        if (ch == '\n')
+            break;
+        if (ch == '\r') {
+            if (start < len && data[start] == '\n') {
+                start++;
+                break;
+            }
+            continue;
+        }
+    }
+
+    if (start >= len) {
+        strbuf_reset(&ctx->buf);
+        ctx->lines = 0;
+        return;
+    }
+
+    size_t remaining = len - start;
+    memmove(data, data + start, remaining);
+    ctx->buf.len    = remaining;
+    data[remaining] = '\0';
+    if (ctx->lines > 0)
+        ctx->lines--;
 }
 
 void
@@ -300,4 +431,10 @@ offscr_free(struct offscr_ctx *ctx)
         return;
     strbuf_free(&ctx->buf);
     free(ctx);
+}
+
+static int
+poll_timeout_value_(unsigned int timeout_ms)
+{
+    return timeout_ms == 0 ? -1 : (int)timeout_ms;
 }

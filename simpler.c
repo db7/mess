@@ -16,9 +16,9 @@
 // CHECK: [man] [4] (8,34)-(8,44)
 // CHECK-SAME: [man] [4] {{.*}} "wordexp(3)" -> man://wordexp.3
 
+#include "log.h"
 #include "nav.h"
 #include "readq.h"
-#include "log.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -40,11 +40,12 @@ int
 main(void)
 {
     struct offscr_opts opts = {
-        .max_bytes          = 0,
-        .capture_timeout_ms = 0,
-        .max_lines          = 10,
+        .max_bytes             = 0,
+        .first_byte_timeout_ms = 0,
+        .next_byte_timeout_ms  = 0,
+        .max_lines             = 30,
     };
-    int status                  = EXIT_FAILURE;
+    int status = EXIT_FAILURE;
     struct termios saved_termios;
     bool raw_configured = false;
 
@@ -54,18 +55,20 @@ main(void)
         goto out;
     }
 
-    int fd = open("input.txt", O_RDONLY);
+    // int fd = open("input.txt", O_RDONLY);
+    int fd = STDIN_FILENO;
 
     if (offscr_capture(ctx, fd) < 0) {
         perror("offscr_capture");
         goto out;
     }
-    close(fd);
+    if (fd != STDIN_FILENO)
+        close(fd);
 
     struct offscr_view view = offscr_view(ctx);
-
-    if (isatty(STDIN_FILENO)) {
-        if (configure_tty_raw(STDIN_FILENO, &saved_termios) == 0)
+    int tty                 = open("/dev/tty", O_RDONLY);
+    if (isatty(tty)) {
+        if (configure_tty_raw(tty, &saved_termios) == 0)
             raw_configured = true;
         else
             perror("configure_tty_raw");
@@ -83,7 +86,7 @@ main(void)
     }
 
     struct readq input_queue;
-    readq_init(&input_queue, STDIN_FILENO);
+    readq_init(&input_queue, tty);
 
     struct sigaction sa = {
         .sa_handler = handle_sigint,
@@ -92,32 +95,38 @@ main(void)
     sigaction(SIGINT, &sa, NULL);
 
     nav_result_t nav_rc =
-        nav_run(global_nav, &view, &input_queue, STDOUT_FILENO);
+        nav_run(global_nav, &view, &input_queue, STDOUT_FILENO, 0, true);
     const char *final_msg = NULL;
     switch (nav_rc) {
-    case NAV_RESULT_STOP:
-        final_msg = "nav: stop";
-        status    = EXIT_SUCCESS;
-        break;
-    case NAV_RESULT_REFRESH:
-        final_msg = "nav: refresh";
-        status    = EXIT_SUCCESS;
-        break;
-    case NAV_RESULT_CANCELLED:
-        final_msg = "nav: cancelled";
-        status    = EXIT_SUCCESS;
-        break;
-    default:
-        final_msg = "nav: error";
-        status    = EXIT_FAILURE;
-        break;
+        case NAV_RESULT_STOP:
+            final_msg = "nav: stop";
+            status    = EXIT_SUCCESS;
+            break;
+        case NAV_RESULT_REFRESH:
+            final_msg = "nav: refresh";
+            status    = EXIT_SUCCESS;
+            break;
+        case NAV_RESULT_CANCELLED:
+            final_msg = "nav: cancelled";
+            status    = EXIT_SUCCESS;
+            break;
+        case NAV_RESULT_QUIT:
+            final_msg = "nav: quit";
+            status    = EXIT_SUCCESS;
+            break;
+        default:
+            final_msg = "nav: error";
+            status    = EXIT_FAILURE;
+            break;
     }
     if (final_msg)
-        log_debugln("%s", final_msg);
+        log_debug("%s", final_msg);
 
 out:
-    if (raw_configured)
-        restore_tty(STDIN_FILENO, &saved_termios);
+    if (raw_configured) {
+        restore_tty(tty, &saved_termios);
+        close(tty);
+    }
     nav_destroy(global_nav);
     global_nav = NULL;
     if (ctx)

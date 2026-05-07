@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +51,8 @@ test_capture_timeout_(void)
 
 	struct offscr_opts opts = {
 		.max_bytes = 1024,
-		.capture_timeout_ms = 25,
+		.first_byte_timeout_ms = 25,
+		.next_byte_timeout_ms = 25,
 	};
 	struct offscr_ctx *ctx = offscr_new(&opts);
 	assert(ctx != NULL);
@@ -88,7 +90,8 @@ test_capture_respects_limit_(void)
 
 	struct offscr_opts opts = {
 		.max_bytes = 5,
-		.capture_timeout_ms = 100,
+		.first_byte_timeout_ms = 100,
+		.next_byte_timeout_ms = 100,
 		.max_lines = 0,
 	};
 	struct offscr_ctx *ctx = offscr_new(&opts);
@@ -122,7 +125,8 @@ test_capture_respects_line_limit_(void)
 
 	struct offscr_opts opts = {
 		.max_bytes = 0,
-		.capture_timeout_ms = 100,
+		.first_byte_timeout_ms = 100,
+		.next_byte_timeout_ms = 100,
 		.max_lines = 2,
 	};
 	struct offscr_ctx *ctx = offscr_new(&opts);
@@ -145,7 +149,7 @@ test_capture_respects_line_limit_(void)
 }
 
 static void
-test_offscr_extract_detects_cursor_move(void)
+test_offscr_extract_ignores_cursor_move(void)
 {
 	const char sample[] = "\x1b[Afoo";
 	struct offscr_view view = {
@@ -153,7 +157,36 @@ test_offscr_extract_detects_cursor_move(void)
 		.len  = strlen(sample),
 	};
 	char *line = offscr_extract(&view, 0);
-	assert(line == NULL);
+	assert(line != NULL);
+	assert(strcmp(line, "foo") == 0);
+	free(line);
+}
+
+/* Verify drain mode consumes input without storing a view. */
+static void
+test_capture_drain_discards_snapshot_(void)
+{
+	int pipefd[2];
+	assert(pipe(pipefd) == 0);
+
+	struct offscr_opts opts = {
+		.first_byte_timeout_ms = 50,
+		.next_byte_timeout_ms = 50,
+		.drain = true,
+	};
+	struct offscr_ctx *ctx = offscr_new(&opts);
+	assert(ctx != NULL);
+
+	write_payload_(pipefd[1], "drain me");
+	close(pipefd[1]);
+
+	assert(offscr_capture(ctx, pipefd[0]) == OFFSCR_CAPTURE_OK);
+	struct offscr_view view = offscr_view(ctx);
+	assert(view.len == 0);
+	assert(view.truncated == 0);
+
+	close(pipefd[0]);
+	offscr_free(ctx);
 }
 
 int
@@ -163,7 +196,8 @@ main(void)
 	test_capture_timeout_();
 	test_capture_respects_limit_();
 	test_capture_respects_line_limit_();
-	test_offscr_extract_detects_cursor_move();
+	test_offscr_extract_ignores_cursor_move();
+	test_capture_drain_discards_snapshot_();
 	puts("offscr tests OK");
 	return 0;
 }

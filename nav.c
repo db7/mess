@@ -1,7 +1,6 @@
-#include "nav.h"
-
 #include "links.h"
 #include "log.h"
+#include "nav.h"
 #include "styler.h"
 
 #include <ctype.h>
@@ -37,6 +36,7 @@ enum nav_process_code {
     NAV_PROCESS_CONTINUE = 0,
     NAV_PROCESS_STOP,
     NAV_PROCESS_REFRESH,
+    NAV_PROCESS_QUIT,
 };
 
 struct nav_process_result {
@@ -55,7 +55,9 @@ struct nav_state {
     struct link_iter prev;
     struct link_iter cur;
     size_t baseline_row;
+    size_t screen_cols;
     int out_fd;
+    bool status_visible;
 };
 
 static struct nav *global_nav_;
@@ -78,17 +80,19 @@ static char *render_line_for_span_(const struct nav_state *state,
 static char *render_plain_line_(const struct nav_state *state,
                                 const struct link_span *span);
 static void append_replace_line_action_(struct nav_action_list *actions,
-                                        size_t row, char *line,
-                                        bool is_skip);
+                                        size_t row, char *line, bool is_skip);
 static void append_uri_action_(struct nav_action_list *actions,
                                enum nav_action_type type, const char *uri);
-static void apply_actions_(const struct nav_state *state,
+static void apply_actions_(struct nav_state *state,
                            const struct nav_action *actions);
 static void nav_log_actions_(const struct nav_state *state,
                              const struct nav_action *actions);
 static void nav_free_actions(struct nav_action *);
 static struct nav_process_result nav_process_input_(struct nav_state *,
                                                     struct readq *);
+static void nav_draw_status_bar_(struct nav_state *state);
+static void nav_status_clear_(struct nav_state *state);
+#define NAV_NEXT_LINK_HOTKEY '\t'
 
 struct nav *
 nav_create(const struct nav_opts *opts)
@@ -124,21 +128,23 @@ nav_destroy(struct nav *nav)
 
 nav_result_t
 nav_run(struct nav *nav, const struct offscr_view *view, struct readq *rq,
-        int out_fd)
+        int out_fd, size_t width, bool redraw)
 {
     if (!nav || !view || !rq || out_fd < 0) {
-        log_debugln("nav: invalid parameters");
+        log_debug("nav: invalid parameters");
         return NAV_RESULT_ERROR;
     }
 
     struct nav_state state = {
-        .view   = view,
-        .rq     = rq,
-        .out_fd = out_fd,
+        .view           = view,
+        .rq             = rq,
+        .out_fd         = out_fd,
+        .screen_cols    = width,
+        .status_visible = false,
     };
 
     if (parse_links(view, LINKS_KIND_OSC8, &state.prev) == -1) {
-        log_debugln("nav: parse_links failed");
+        log_debug("nav: parse_links failed");
         return NAV_RESULT_ERROR;
     }
     state.cur = state.prev;
@@ -149,42 +155,42 @@ nav_run(struct nav *nav, const struct offscr_view *view, struct readq *rq,
             state.baseline_row++;
     }
 
-    const char reset_seq[] = "\x1b[2J\x1b[H";
-    (void)write(out_fd, reset_seq, sizeof(reset_seq) - 1);
-    (void)write(out_fd, view->data, view->len);
+    if (redraw) {
+        const char reset_seq[] = "\x1b[2J\x1b[H";
+        (void)write(out_fd, reset_seq, sizeof(reset_seq) - 1);
+        (void)write(out_fd, view->data, view->len);
+        char place[32];
+        int place_len = snprintf(place, sizeof(place), "\x1b[%zu;1H",
+                                 state.baseline_row + 1);
+        if (place_len > 0)
+            (void)write(out_fd, place, (size_t)place_len);
+        nav_draw_status_bar_(&state);
+    }
 
     nav_result_t final_result = NAV_RESULT_ERROR;
 
     while (1) {
-        struct pollfd pfds[2];
-        nfds_t nfds = 0;
-        pfds[nfds].fd      = rq->fd;
-        pfds[nfds].events  = POLLIN;
-        pfds[nfds].revents = 0;
-        nfds++;
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(rq->fd, &readfds);
+        int max_fd = rq->fd;
+
         if (nav->notify_rd >= 0) {
-            pfds[nfds].fd      = nav->notify_rd;
-            pfds[nfds].events  = POLLIN;
-            pfds[nfds].revents = 0;
-            nfds++;
+            FD_SET(nav->notify_rd, &readfds);
+            if (nav->notify_rd > max_fd)
+                max_fd = nav->notify_rd;
         }
 
-        int ready = poll(pfds, nfds, -1);
+        int ready = select(max_fd + 1, &readfds, NULL, NULL, NULL);
         if (ready < 0) {
             if (errno == EINTR)
                 continue;
-            log_debugln("nav: poll failed");
+            log_debug("nav: select failed");
             final_result = NAV_RESULT_ERROR;
             break;
         }
 
-        if (pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            log_debugln("nav: tty error");
-            final_result = NAV_RESULT_ERROR;
-            break;
-        }
-
-        if (pfds[0].revents & POLLIN) {
+        if (FD_ISSET(rq->fd, &readfds)) {
             bool filled = readq_refill(rq);
             (void)filled;
             struct nav_process_result pr = nav_process_input_(&state, rq);
@@ -193,29 +199,37 @@ nav_run(struct nav *nav, const struct offscr_view *view, struct readq *rq,
             nav_free_actions(pr.actions);
 
             if (pr.status == NAV_PROCESS_STOP) {
+                nav_status_clear_(&state);
                 final_result = NAV_RESULT_STOP;
                 break;
             }
             if (pr.status == NAV_PROCESS_REFRESH) {
+                nav_status_clear_(&state);
                 const char refresh = '\f';
                 (void)write(out_fd, &refresh, 1);
                 final_result = NAV_RESULT_REFRESH;
                 break;
             }
+            if (pr.status == NAV_PROCESS_QUIT) {
+                nav_status_clear_(&state);
+                final_result = NAV_RESULT_QUIT;
+                break;
+            }
         }
 
-        if (nav->notify_rd >= 0 && nfds > 1 &&
-            (pfds[1].revents & (POLLIN | POLLERR | POLLHUP))) {
+        if (nav->notify_rd >= 0 && FD_ISSET(nav->notify_rd, &readfds)) {
             char ch;
             ssize_t n = read(nav->notify_rd, &ch, 1);
             if (n > 0 && ch != 0) {
-                log_debugln("nav: cancelled");
+                nav_status_clear_(&state);
+                log_debug("nav: canceled");
                 final_result = NAV_RESULT_CANCELLED;
                 break;
             }
         }
     }
 
+    nav_status_clear_(&state);
     link_iter_free(&state.prev);
     return final_result;
 }
@@ -250,7 +264,13 @@ nav_process_input_(struct nav_state *state, struct readq *rq)
             break;
         }
 
-        if (byte == ' ') {
+        if (byte == 'q' || byte == 'Q') {
+            rq->start++;
+            result.status = NAV_PROCESS_QUIT;
+            break;
+        }
+
+        if (byte == ' ' || byte == NAV_NEXT_LINK_HOTKEY) {
             cycle_link_(state, +1, &actions);
             rq->start++;
             continue;
@@ -291,9 +311,9 @@ nav_process_input_(struct nav_state *state, struct readq *rq)
         }
 
         if (isprint(byte))
-            log_debugln("input: '%c' (0x%02x)", byte, byte);
+            log_debug("input: '%c' (0x%02x)", byte, byte);
         else
-            log_debugln("input: 0x%02x", byte);
+            log_debug("input: 0x%02x", byte);
         rq->start++;
     }
 
@@ -382,7 +402,7 @@ collect_block_(struct nav_state *state, size_t start_idx,
     bool first_entry = true;
 
     const struct link_span *first_span = links_get(&state->cur, idx);
-    const char *url = first_span ? first_span->link : NULL;
+    const char *url                    = first_span ? first_span->link : NULL;
 
     while (processed < count) {
         const struct link_span *span = links_get(&state->cur, idx);
@@ -393,8 +413,7 @@ collect_block_(struct nav_state *state, size_t start_idx,
 
         char *line = render_line_for_span_(state, span);
         if (line)
-            append_replace_line_action_(actions, span->row, line,
-                                        !first_entry);
+            append_replace_line_action_(actions, span->row, line, !first_entry);
 
         processed++;
         first_entry = false;
@@ -419,7 +438,7 @@ append_plain_history_forward_(struct nav_state *state, size_t target,
 
     while (idx != dest) {
         const struct link_span *span = links_get(&state->prev, idx);
-        char *line = render_plain_line_(state, span);
+        char *line                   = render_plain_line_(state, span);
         if (line && span)
             append_replace_line_action_(actions, span->row, line, false);
         idx = step_index_(idx, count, +1);
@@ -440,9 +459,9 @@ append_plain_history_backward_(struct nav_state *state, size_t target,
     size_t dest  = target % count;
 
     while (idx != dest) {
-        idx = step_index_(idx, count, -1);
+        idx                          = step_index_(idx, count, -1);
         const struct link_span *span = links_get(&state->prev, idx);
-        char *line = render_plain_line_(state, span);
+        char *line                   = render_plain_line_(state, span);
         if (line && span)
             append_replace_line_action_(actions, span->row, line, false);
     }
@@ -486,8 +505,7 @@ render_line_for_span_(const struct nav_state *state,
 }
 
 static char *
-render_plain_line_(const struct nav_state *state,
-                   const struct link_span *span)
+render_plain_line_(const struct nav_state *state, const struct link_span *span)
 {
     if (!state || !span || !state->view)
         return NULL;
@@ -520,8 +538,8 @@ append_replace_line_action_(struct nav_action_list *actions, size_t row,
 }
 
 static void
-append_uri_action_(struct nav_action_list *actions,
-                   enum nav_action_type type, const char *uri)
+append_uri_action_(struct nav_action_list *actions, enum nav_action_type type,
+                   const char *uri)
 {
     if (!actions || !uri)
         return;
@@ -542,26 +560,25 @@ append_uri_action_(struct nav_action_list *actions,
 }
 
 static void
-apply_actions_(const struct nav_state *state,
-               const struct nav_action *actions)
+apply_actions_(struct nav_state *state, const struct nav_action *actions)
 {
     if (!state)
         return;
     for (const struct nav_action *action = actions; action;
-         action                         = action->next) {
+         action                          = action->next) {
         if (action->type != NAV_ACTION_REPLACE_LINE || !action->content)
             continue;
         char seq[64];
-        int len = snprintf(seq, sizeof(seq), "\x1b[%zu;1H\x1b[2K",
-                           action->row + 1);
+        int len =
+            snprintf(seq, sizeof(seq), "\x1b[%zu;1H\x1b[2K", action->row + 1);
         if (len > 0) {
             if (write(state->out_fd, seq, (size_t)len) == -1)
-                log_debugln("nav: write seq failed");
+                log_debug("nav: write seq failed");
         }
         size_t l = strlen(action->content);
         if (l > 0) {
             if (write(state->out_fd, action->content, l) == -1)
-                log_debugln("nav: write content failed");
+                log_debug("nav: write content failed");
         }
     }
     char restore[32];
@@ -569,6 +586,7 @@ apply_actions_(const struct nav_state *state,
                                state->baseline_row + 1);
     if (restore_len > 0)
         (void)write(state->out_fd, restore, (size_t)restore_len);
+    nav_draw_status_bar_(state);
 }
 
 static void
@@ -578,19 +596,98 @@ nav_log_actions_(const struct nav_state *state,
     (void)state;
 
     for (const struct nav_action *action = actions; action;
-         action                         = action->next) {
+         action                          = action->next) {
         if (action->type == NAV_ACTION_REPLACE_LINE && action->content) {
             const char *label = action->is_skip ? "skip" : "link";
-            log_debugln("%s row %zu: %s", label, action->row + 1,
-                        action->content);
+            log_debug("%s row %zu: %s", label, action->row + 1,
+                      action->content);
         } else if ((action->type == NAV_ACTION_OPEN_URI ||
                     action->type == NAV_ACTION_EDIT_URI) &&
                    action->uri) {
             const char *verb =
                 action->type == NAV_ACTION_OPEN_URI ? "open" : "edit";
-            log_debugln("%s %s", verb, action->uri);
+            log_debug("%s %s", verb, action->uri);
         }
     }
+}
+
+static void
+nav_draw_status_bar_(struct nav_state *state)
+{
+    if (!state)
+        return;
+    static const char clear_seq[]   = "\x1b[2K";
+    static const char pip_label[]   = "[mess] ";
+    static const char color_start[] = "\x1b[48;5;238m\x1b[97m";
+    static const char color_end[]   = "\x1b[0m";
+
+    (void)write(state->out_fd, clear_seq, sizeof(clear_seq) - 1);
+
+    size_t width = state->screen_cols;
+    if (width == 0) {
+        (void)write(state->out_fd, color_start, sizeof(color_start) - 1);
+        (void)write(state->out_fd, pip_label, strlen(pip_label));
+        (void)write(state->out_fd, color_end, sizeof(color_end) - 1);
+        char move[32];
+        int move_len =
+            snprintf(move, sizeof(move), "\x1b[%zu;1H", state->baseline_row + 1);
+        if (move_len > 0)
+            (void)write(state->out_fd, move, (size_t)move_len);
+        state->status_visible = true;
+        return;
+    }
+
+    char *bar = calloc(width, sizeof(char));
+    if (!bar) {
+        (void)write(state->out_fd, color_start, sizeof(color_start) - 1);
+        (void)write(state->out_fd, pip_label, strlen(pip_label));
+        (void)write(state->out_fd, color_end, sizeof(color_end) - 1);
+        (void)write(state->out_fd, "\r", 1);
+        state->status_visible = true;
+        return;
+    }
+
+    memset(bar, ' ', width);
+    size_t label_len = strlen(pip_label);
+    if (label_len > width)
+        label_len = width;
+    memcpy(bar, pip_label, label_len);
+    (void)write(state->out_fd, color_start, sizeof(color_start) - 1);
+    (void)write(state->out_fd, bar, width);
+    free(bar);
+    (void)write(state->out_fd, color_end, sizeof(color_end) - 1);
+    char move[64];
+    size_t col = width > 0 ? width : 1;
+    int move_len = snprintf(move, sizeof(move), "\x1b[%zu;%zuH",
+                            state->baseline_row + 1, col);
+    if (move_len > 0)
+        (void)write(state->out_fd, move, (size_t)move_len);
+    state->status_visible = true;
+}
+
+static void
+nav_status_clear_(struct nav_state *state)
+{
+    if (!state || !state->status_visible)
+        return;
+
+    char seq[64];
+    size_t row = state->baseline_row + 1;
+    int len    = snprintf(seq, sizeof(seq), "\x1b[%zu;1H\x1b[2K", row);
+    if (len > 0)
+        (void)write(state->out_fd, seq, (size_t)len);
+
+    char *last_row = NULL;
+    if (state->view)
+        last_row = offscr_extract(state->view, state->baseline_row);
+    if (last_row) {
+        size_t text_len = strlen(last_row);
+        if (text_len > 0)
+            (void)write(state->out_fd, last_row, text_len);
+        free(last_row);
+    }
+    (void)write(state->out_fd, "\r", 1);
+    state->status_visible = false;
 }
 
 static void

@@ -17,4 +17,6 @@ struct range {
     size_t end;
 };
 
+#define unreachable() __builtin_unreachable()
+
 #endif // defs_h_INCLUDED

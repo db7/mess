@@ -17,6 +17,7 @@ readq_init(struct readq *queue, int fd)
 }
 
 // Refill the buffer from the file descriptor
+// Return true if more data is available
 bool
 readq_refill(struct readq *queue)
 {
@@ -57,10 +58,7 @@ int
 readq_pick_byte(struct readq *queue)
 {
     if (queue->start >= queue->end) {
-        // Buffer is empty, try to refill it
-        if (1 || !readq_refill(queue)) {
-            return -1; // No more data available
-        }
+        return -1; // No more data available
     }
 
     // Return the next byte and advance the start index

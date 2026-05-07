@@ -9,6 +9,7 @@
 #ifndef MESS_OFFSCR_H
 #define MESS_OFFSCR_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 /*
@@ -20,15 +21,21 @@ enum offscr_status { OFFSCR_CAPTURE_OK = 0, OFFSCR_CAPTURE_TIMEOUT = 1 };
 
 /*
  * Tunables for an off-screen capture context.
- * max_bytes limits how much data is stored per snapshot (0 = unlimited),
- * capture_timeout_ms defines how long poll() waits for initial bytes
- * before reporting a timeout (0 = block indefinitely), and max_lines
- * optionally caps the number of newline-terminated lines copied (0 = no cap).
+ * max_bytes limits how much data is stored per snapshot (0 = unlimited).
+ * first_byte_timeout_ms caps how long capture waits for the very first byte
+ * of a snapshot (0 = block indefinitely, otherwise default to 1000ms).
+ * next_byte_timeout_ms controls the inter-byte wait once data is flowing
+ * (0 = block indefinitely, otherwise default to 250ms). max_lines optionally
+ * caps the number of newline-terminated lines copied (0 = no cap), and drain
+ * toggles whether capture buffers the stream (false) or simply drains it
+ * without retaining a snapshot (true).
  */
 struct offscr_opts {
     size_t max_bytes;
-    unsigned int capture_timeout_ms;
+    unsigned int first_byte_timeout_ms;
+    unsigned int next_byte_timeout_ms;
     size_t max_lines;
+    bool drain;
 };
 
 /*
@@ -46,7 +53,8 @@ struct offscr_ctx;
 
 /*
  * Allocate a snapshot context configured with the supplied options.
- * Passing NULL applies sensible defaults (64KiB buffer, 250ms timeout).
+ * Passing NULL applies sensible defaults (64KiB buffer, 1s first-byte timeout,
+ * 250ms inter-byte timeout).
  * Returns NULL on allocation failure.
  */
 struct offscr_ctx *offscr_new(const struct offscr_opts *);
@@ -55,9 +63,10 @@ struct offscr_ctx *offscr_new(const struct offscr_opts *);
  * Capture a snapshot from the child PTY identified by child_fd.
  * On success the buffered view is replaced with fresh bytes and
  * OFFSCR_CAPTURE_OK is returned. If no data becomes available before
- * the timeout expires, OFFSCR_CAPTURE_TIMEOUT is returned and the
- * previous snapshot is left untouched. On error, -1 is returned and
- * errno conveys the failure reason.
+ * the initial timeout (or the inter-byte timeout once data is flowing),
+ * OFFSCR_CAPTURE_TIMEOUT is returned and the previous snapshot is left
+ * untouched. When drain mode is enabled the data is consumed without being
+ * stored. On error, -1 is returned and errno conveys the failure reason.
  */
 int offscr_capture(struct offscr_ctx *, int child_fd);
 
@@ -75,10 +84,21 @@ struct offscr_view offscr_view(const struct offscr_ctx *);
 
 /*
  * Return a string containing the visible characters of `row` from `view`.
- * Escapes such as CSI/OSC are preserved, but cursor-movement sequences are
- * skipped when the view’s columns are tracked.
+ * Escapes such as CSI/OSC are preserved; cursor-movement sequences are dropped
+ * and logged so callers know the snapshot may omit overwritten cells.
  */
 char *offscr_extract(const struct offscr_view *, size_t row);
+
+/*
+ * Convenience helper to log up to max_rows from view via log_debug().
+ * Passing max_rows = 0 dumps until offscr_extract() returns NULL.
+ */
+void offscr_dump(const struct offscr_view *, size_t max_rows);
+
+/*
+ * Drop the first row from the snapshot stored in ctx, if any.
+ */
+void offscr_forget_first_row(struct offscr_ctx *);
 
 /*
  * Release storage associated with the context, invalidating any extant views.

@@ -2,7 +2,9 @@ compile_flags.txt
 *.bin
 *.dSYM
 *.orig
+*.o
 mess
+simpler
 mess.1
 version.h
 *_runner

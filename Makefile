@@ -8,15 +8,15 @@ MESS_SRCS=	main.c dispatcher.c pager.c nav.c offscr.c readq.c uri.c \
 		links.c styler.c strbuf.c log.c
 MESS_HDRS=	dispatcher.h pager.h nav.h offscr.h readq.h uri.h strbuf.h
 
-TESTS_SRC=	tests/test-reader.c \
+TESTS_SRC=	tests/test-readq.c \
 		tests/test-uri.c \
-		tests/tes-offscr.c \
+		tests/test-offscr.c \
 		tests/test-styler.c \
 		tests/test-links.c \
 		tests/test-strbuf.c
-TESTS_BIN=	tests/test-reader.bin \
+TESTS_BIN=	tests/test-readq.bin \
 		tests/test-uri.bin \
-		tests/tes-offscr.bin \
+		tests/test-offscr.bin \
 		tests/test-styler.bin \
 		tests/test-links.bin \
 		tests/test-strbuf.bin
@@ -43,10 +43,10 @@ MANDIR=		$(PREFIX)/share/man
 INSTALL=	install
 
 .PHONY: all clean test install coverage coverage-info format
-all: $(TARGETS) $(TESTS_BIN) $(MANPAGE)
+all: $(TARGETS) $(TESTS_BIN) mess.1
 
 clean:
-	rm -rf $(TARGETS) $(TESTS_BIN) styler.o strbuf.o $(VERSION_HDR) $(MANPAGE)
+	rm -rf $(TARGETS) $(TESTS_BIN) *.o version.h mess.1
 	rm -rf *.dSYM tests/*.dSYM tests/integration/*.dSYM
 	rm -rf *.gcno tests/*.gcno tests/integration/*.gcno
 	rm -rf *.gcda tests/*.gcda tests/integration/*.gcda
@@ -101,7 +101,7 @@ install: mess $(MANPAGE)
 tests/test-links.bin: tests/test-links.c links.c strbuf.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-tests/tes-offscr.bin: tests/tes-offscr.c links.c offscr.c readq.c uri.c strbuf.c
+tests/tes-offscr.bin: tests/tes-offscr.c links.c offscr.c readq.c uri.c strbuf.c log.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/test-styler.bin: tests/test-styler.c styler.o strbuf.o
@@ -110,7 +110,7 @@ tests/test-styler.bin: tests/test-styler.c styler.o strbuf.o
 tests/test-strbuf.bin: tests/test-strbuf.c strbuf.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-tests/test-%.bin: tests/test-%.c links.c offscr.c readq.c uri.c strbuf.c
+tests/test-%.bin: tests/test-%.c links.c offscr.c readq.c uri.c strbuf.c log.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 format:
