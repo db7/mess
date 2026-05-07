@@ -18,7 +18,13 @@ mess \- wrap a pager and navigate OSC8 links
 launches a pager (by default
 .BR less (1))
 inside a pseudo terminal, intercepts its output, and enables keyboard
-navigation for OSC8 hyperlinks. All command line arguments other than
+navigation for OSC8 hyperlinks on POSIX systems such as macOS, the BSDs, and
+Linux. It relies on common utilities including
+.BR less (1),
+.BR lynx (1),
+and
+.BR lowdown (1)
+as helpers. All command line arguments other than
 .B --open
 and
 .B --help
@@ -51,6 +57,56 @@ and exposes them as navigation targets. Cycling through links now highlights
 those references directly in the pager, and activating them opens the matching
 .I man://
 URI.
+.SH EXAMPLES
+.nf
+$ mess README.md            # page a regular file with link navigation
+$ mess --open https://bsd.lv/projects # open a URL without starting the pager
+$ mess --open man://ls.1    # resolve and view ls(1) through the dispatcher
+$ MANPAGER='mess -m' man 7 signal    # keep manual cross references interactive
+.fi
+.PP
+Set
+.B PAGER=mess
+system wide when you want the wrapper to stand in for
+.BR less (1);
+export
+.B MESSPAGER="less -R"
+to point downstream at your preferred pager so recursive invocations keep
+working.
+.SH REQUIREMENTS
+.B mess
+targets POSIX systems such as macOS 12 or newer, the BSD family, and modern
+Linux distributions with glibc 2.31 or musl 1.2. Building requires a C11
+compiler (for example Clang 14+ or GCC 11+) and
+.BR make (1)
+so the bundled
+.B Makefile
+can enforce the default
+.B -Wall -Wextra -Werror
+flags. Runtime behavior depends on standard utilities:
+.BR less (1)
+or another pager,
+.BR mdcat (1)
+or
+.BR lowdown (1)
+to render Markdown,
+.BR lynx (1)
+for inline browsing, and a graphical opener such as
+.BR open (1)
+or
+.BR xdg-open (1).
+The dispatcher honors the
+.B PAGER
+,
+.B MESSPAGER
+,
+.B BROWSER
+, and
+.B MESS_MDRENDER
+environment variables when selecting these helpers, and the integration test
+suite additionally uses
+.BR tikl (1)
+to drive dispatcher fixtures.
 .SH OPTIONS
 .TP
 .BR --open " " target
@@ -201,7 +257,7 @@ Markdown renderer to apply before piping the output into the pager when opening
 `.md` files directly. The default command is
 .BR "lowdown -tterm --term-no-links" .
 Point this variable at another converter (for example `pandoc -t plain`) to
-customise the preview.
+customize the preview.
 .TP
 .B MESS_DEBUG_STATUS
 Optional path that enables logging of every status-line update emitted by
@@ -212,6 +268,10 @@ default so no extra files are created.
 exits 0 when the pager and any helper processes finish successfully.
 Failures to spawn helpers, pager errors, or signal induced aborts result in a
 non zero status.
+.PP
+Common exit scenarios include quitting the pager normally, consuming all input
+from a pipe, receiving consecutive interrupts (the second interrupt forces an
+abort), or encountering system I/O errors while reading and writing the PTY.
 .SH SEE ALSO
 .BR less (1),
 .BR lowdown (1),
