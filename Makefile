@@ -1,57 +1,60 @@
 .POSIX:
 
-TARGETS=	mess simpler
-MANPAGE=	mess.1
-VERSION_HDR=	version.h
-
-MESS_SRCS=	main.c dispatcher.c pager.c nav.c offscr.c readq.c uri.c \
-		links.c styler.c strbuf.c log.c
-MESS_HDRS=	dispatcher.h pager.h nav.h offscr.h readq.h uri.h strbuf.h
-
-TESTS_SRC=	tests/test-readq.c \
-		tests/test-uri.c \
-		tests/test-offscr.c \
-		tests/test-styler.c \
-		tests/test-links.c \
-		tests/test-strbuf.c
-TESTS_BIN=	tests/test-readq.bin \
-		tests/test-uri.bin \
-		tests/test-offscr.bin \
-		tests/test-styler.bin \
-		tests/test-links.bin \
-		tests/test-strbuf.bin
-
 CC=		cc
-#CFLAGS=		-O2 -g
-CFLAGS=		-O0 -g3
-CFLAGS+= 	-I. -std=c11 -Wall -Wextra -Werror
+CFLAGS=		-O0 -g3 -Wall -Wextra -Werror
+CFLAGS.objs=	-std=c11 -MMD -MP
+CPPFLAGS=	-I. -Itests
+LDFLAGS=
+LDLIBS=
 
-OS=		$(shell uname -s)
-CSOURCE=	$(shell if [ $(OS) = Linux ]; then echo _GNU_SOURCE; \
-		elif [ $(OS) = Darwin ]; then echo _DARWIN_C_SOURCE; \
-		elif [ $(OS) = NetBSD ]; then echo _NETBSD_SOURCE; \
-		else echo _POSIX_C_SOURCE=200809L; fi)
-CFLAGS+=	-D$(CSOURCE)
-
-# libutil is needed on BSD/macOS for openpty(), not on Linux.
-LDLIBS!=	if [ "$(uname -s)" != Linux ]; \
-		then echo '-lutil'; fi
+CFLAGS.cov=	${CFLAGS} -fprofile-arcs -ftest-coverage
+LDFLAGS.cov=	${LDFLAGS} -fprofile-arcs -ftest-coverage
 
 PREFIX=		/usr/local
-BINDIR=		$(PREFIX)/bin
-MANDIR=		$(PREFIX)/share/man
+BINDIR=		${PREFIX}/bin
+MANDIR=		${PREFIX}/share/man
 INSTALL=	install
 
-.PHONY: all clean test install coverage coverage-info format
-all: $(TARGETS) $(TESTS_BIN) mess.1
+SRCS=		main.c dispatcher.c pager.c \
+		nav.c offscr.c readq.c \
+		uri.c links.c styler.c \
+		strbuf.c log.c
+OBJS=		${SRCS:S/.c/.o/}
+OBJS=		${SRCS:.c=.o}
+
+SRCS.test=	$(shell find tests -name '*.c' -depth 1)
+SRCS.test!=	find tests -name '*.c' -depth 1
+TGTS.test=	${SRCS.test:S/.c/.bin/}
+TGTS.test=	${SRCS.test:.c=.bin}
+
+# ------------------------------------------------------------------------------
+# main targets
+# ------------------------------------------------------------------------------
+
+all: mess mess.1 ${TGTS.test}
 
 clean:
-	rm -rf $(TARGETS) $(TESTS_BIN) *.o version.h mess.1
-	rm -rf *.dSYM tests/*.dSYM tests/integration/*.dSYM
-	rm -rf *.gcno tests/*.gcno tests/integration/*.gcno
-	rm -rf *.gcda tests/*.gcda tests/integration/*.gcda
-	rm -rf *.gcov tests/*.gcov tests/integration/*.gcov
-	${MAKE} -C tests/runner clean
+	rm -rf mess ${DEPS} ${OBJS} ${TGTS.test}
+	@find . \( -name '*.dSYM' \
+		-o -name '*.d' \
+		-o -name '*.o' \
+		-o -name '*.bin' \) -exec rm -rf {} +
+
+distclean: clean
+	rm -rf version.sh mess.1
+
+format:
+	@find . -name '*.h' -exec clang-format -i --style=file {} +
+	@find . -name '*.c' -exec clang-format -i --style=file {} +
+
+install: mess mess.1
+	${INSTALL} -d "${DESTDIR}${BINDIR}"
+	${INSTALL} -d "${DESTDIR}${MANDIR}/man1"
+	${INSTALL} -m 755 mess "${DESTDIR}${BINDIR}/mess"
+	${INSTALL} -m 644 mess.1 "${DESTDIR}${MANDIR}/man1/mess.1"
+
+coverage: clean
+	@${MAKE} CFLAGS="${CFLAGS.cov}" LDFLAGS="${LDFLAGS.cov}" all
 
 version.h: version.h.in
 	./versionize.sh version.h.in > $@
@@ -59,61 +62,41 @@ version.h: version.h.in
 mess.1: mess.1.in
 	./versionize.sh mess.1.in > $@
 
-mess: $(MESS_SRCS) version.h
-	$(CC) $(CFLAGS) -o $@ $(MESS_SRCS) $(LDLIBS)
+mess: ${OBJS}
+	${CC} ${CFLAGS} ${CPPFLAGS} -o $@ ${OBJS} ${LDFLAGS} ${LDLIBS}
 
-simpler: simpler.o nav.o links.o offscr.o styler.o strbuf.o readq.o log.o | version.h
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+.c.o:
+	${CC} ${CFLAGS.objs} ${CFLAGS} ${CPPFLAGS} -c -o $@ $<
 
-test: $(TARGETS) $(TESTS_BIN)
-	@set -e; \
-	for t in $(TESTS_BIN); do \
-		echo "Running $$t"; \
-		if echo "$$t" | grep -q 'integration'; then \
-			$${RUN_INTEGRATION:-} ./$$t; \
-		else \
-			./$$t; \
-		fi; \
-	done
-	@for f in tests/dispatcher/*.c; do \
-		set -e; \
-		tikl -c tests/dispatcher/tikl.conf $$f; \
-	done
-	${MAKE} -C tests/runner all test
+# ------------------------------------------------------------------------------
+# tests
+# ------------------------------------------------------------------------------
 
-coverage:
-	@$(MAKE) clean
-	@$(MAKE) CFLAGS="$(CFLAGS) -fprofile-arcs -ftest-coverage" LDFLAGS="$(LDFLAGS) -fprofile-arcs -ftest-coverage" tests/test-links.bin
-	#@$(MAKE) test
+tests/unit-strbuf.bin:	tests/unit-strbuf.o strbuf.o
+	${CC} -o $@ tests/unit-strbuf.o strbuf.o ${LDFLAGS}
+tests/unit-uri.bin:	tests/unit-uri.o uri.o
+	${CC} -o $@ tests/unit-uri.o uri.o ${LDFLAGS}
+tests/unit-readq.bin:	tests/unit-readq.o readq.o
+	${CC} -o $@ tests/unit-readq.o readq.o ${LDFLAGS}
+tests/unit-links.bin:	tests/unit-links.o links.o strbuf.o
+	${CC} -o $@ tests/unit-links.o links.o strbuf.o ${LDFLAGS}
+tests/unit-styler.bin:	tests/unit-styler.o styler.o strbuf.o
+	${CC} -o $@ tests/unit-styler.o styler.o strbuf.o ${LDFLAGS}
+tests/unit-offscr.bin:	tests/unit-offscr.o links.o offscr.o readq.o uri.o strbuf.o log.o
+	${CC} -o $@ tests/unit-offscr.o links.o offscr.o readq.o uri.o strbuf.o log.o ${LDFLAGS}
+tests/run-links.bin:	tests/run-links.o links.o offscr.o strbuf.o log.o
+	${CC} -o $@ tests/run-links.o links.o offscr.o strbuf.o log.o ${LDFLAGS}
+tests/run-offscr.bin:	tests/run-offscr.o offscr.o strbuf.o log.o
+	${CC} -o $@ tests/run-offscr.o offscr.o strbuf.o log.o ${LDFLAGS}
 
-coverage-info:
-	@if ! command -v gcovr >/dev/null 2>&1; then \
-		echo "gcovr not found. Please install gcovr to generate coverage summaries." >&2; \
-		exit 1; \
-	fi
-	@gcovr --root . --exclude-directories tikl
+.SUFFIXES: .bin
+.o.bin:
+	${CC} -o $@ $< ${LDFLAGS}
 
-install: mess $(MANPAGE)
-	$(INSTALL) -d "$(DESTDIR)$(BINDIR)"
-	$(INSTALL) -m 755 mess "$(DESTDIR)$(BINDIR)/mess"
-	$(INSTALL) -d "$(DESTDIR)$(MANDIR)/man1"
-	$(INSTALL) -m 644 $(MANPAGE) "$(DESTDIR)$(MANDIR)/man1/mess.1"
+test: all
+	@tikl -q -c tests/tikl.conf ${SRCS.test}
 
-tests/test-links.bin: tests/test-links.c links.c strbuf.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
-
-tests/tes-offscr.bin: tests/tes-offscr.c links.c offscr.c readq.c uri.c strbuf.c log.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
-
-tests/test-styler.bin: tests/test-styler.c styler.o strbuf.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
-
-tests/test-strbuf.bin: tests/test-strbuf.c strbuf.c
-	$(CC) $(CFLAGS) -o $@ $^
-
-tests/test-%.bin: tests/test-%.c links.c offscr.c readq.c uri.c strbuf.c log.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
-
-format:
-	@find . -name '*.h' -exec astyle --options=.astylerc {} +
-	@find . -name '*.c' -exec astyle --options=.astylerc {} +
+# ------------------------------------------------------------------------------
+DEPS=	$(shell find . -name '*.d')
+DEPS!=	touch version.d && find . -name '*.d'
+include ${DEPS}

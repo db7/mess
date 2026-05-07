@@ -1,9 +1,10 @@
+#include "pager.h"
+
 #include "defs.h"
 #include "dispatcher.h"
 #include "log.h"
 #include "nav.h"
 #include "offscr.h"
-#include "pager.h"
 #include "readq.h"
 
 #include <assert.h>

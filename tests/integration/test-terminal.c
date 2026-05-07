@@ -3,6 +3,7 @@
 #endif
 
 #include "pager.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -38,8 +39,8 @@ termios_hook_(const struct termios *term, char stage)
     if (hook_fd_ == -1)
         return;
     struct termios_record rec = {stage, *term};
-    size_t offset = 0;
-    const char *ptr = (const char *)&rec;
+    size_t offset             = 0;
+    const char *ptr           = (const char *)&rec;
     while (offset < sizeof(rec)) {
         ssize_t written = write(hook_fd_, ptr + offset, sizeof(rec) - offset);
         if (written <= 0) {
@@ -148,20 +149,20 @@ static void
 run_case_(const char *label, input_fn fn, int expected_exit)
 {
     int master_fd = -1;
-    int slave_fd = -1;
+    int slave_fd  = -1;
     struct winsize win;
-    win.ws_row = 24;
-    win.ws_col = 80;
+    win.ws_row    = 24;
+    win.ws_col    = 80;
     win.ws_xpixel = 0;
     win.ws_ypixel = 0;
     int flags;
     int status = 0;
     int pipe_fds[2];
     struct termios_record rec;
-    struct termios saved = {0};
+    struct termios saved    = {0};
     struct termios restored = {0};
-    bool saw_saved = false;
-    bool saw_restored = false;
+    bool saw_saved          = false;
+    bool saw_restored       = false;
 
     if (pipe(pipe_fds) == -1) {
         perror("pipe");
@@ -200,9 +201,7 @@ run_case_(const char *label, input_fn fn, int expected_exit)
         }
         close_fd_(&slave_fd);
         close_fd_(&master_fd);
-        int rc = pager_run(1, (char *[]) {
-            "mess", NULL
-        });
+        int rc = pager_run(1, (char *[]){"mess", NULL});
         _exit(rc);
     }
 
@@ -227,10 +226,10 @@ run_case_(const char *label, input_fn fn, int expected_exit)
             exit(1);
         }
         if (rec.stage == 'S') {
-            saved = rec.term;
+            saved     = rec.term;
             saw_saved = true;
         } else if (rec.stage == 'R') {
-            restored = rec.term;
+            restored     = rec.term;
             saw_restored = true;
         }
     }

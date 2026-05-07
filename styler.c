@@ -1,4 +1,5 @@
 #include "styler.h"
+
 #include "strbuf.h"
 
 #include <errno.h>
@@ -86,16 +87,15 @@ styler_apply_offsets(const char *line, const struct styler_style *styles,
     if (styles == NULL || style_count == 0)
         return strdup(line);
 
-    size_t line_len = strlen(line);
-    struct styler_style *ordered =
-        malloc(style_count * sizeof(*ordered));
+    size_t line_len              = strlen(line);
+    struct styler_style *ordered = malloc(style_count * sizeof(*ordered));
     if (ordered == NULL)
         return NULL;
     memcpy(ordered, styles, style_count * sizeof(*ordered));
     qsort(ordered, style_count, sizeof(*ordered), style_cmp_);
 
     struct strbuf out = STRBUF_INIT;
-    size_t cursor = 0;
+    size_t cursor     = 0;
 
     for (size_t i = 0; i < style_count; ++i) {
         size_t start = ordered[i].span.start;
@@ -120,8 +120,7 @@ styler_apply_offsets(const char *line, const struct styler_style *styles,
         }
 
         size_t segment_len = end - start;
-        char *clean =
-            strip_styles_slice_(line + start, segment_len, NULL);
+        char *clean = strip_styles_slice_(line + start, segment_len, NULL);
         if (clean == NULL) {
             strbuf_free(&out);
             free(ordered);

@@ -1,3 +1,4 @@
+// RUN: %x
 #include "links.h"
 #include "support/osc8_samples.h"
 
@@ -75,8 +76,7 @@ test_parse_positions(void)
 
     assert(iter.spans[1].row == 1);
     assert(iter.spans[1].columns.start == strlen("Next line"));
-    assert(iter.spans[1].columns.end ==
-           strlen("Next line") + strlen("Second"));
+    assert(iter.spans[1].columns.end == strlen("Next line") + strlen("Second"));
     assert(iter.spans[1].kind == LINKS_KIND_OSC8);
     link_iter_free(&iter);
 }

@@ -1,5 +1,6 @@
-#include "log.h"
 #include "offscr.h"
+
+#include "log.h"
 #include "strbuf.h"
 
 #include <errno.h>
@@ -123,10 +124,12 @@ offscr_capture(struct offscr_ctx *ctx, int fd)
         .fd     = fd,
         .events = POLLIN | POLLHUP | POLLERR,
     };
-    const int first_timeout = poll_timeout_value_(ctx->opts.first_byte_timeout_ms);
-    const int next_timeout  = poll_timeout_value_(ctx->opts.next_byte_timeout_ms);
-    const bool draining     = ctx->opts.drain;
-    int timeout             = first_timeout;
+    const int first_timeout =
+        poll_timeout_value_(ctx->opts.first_byte_timeout_ms);
+    const int next_timeout =
+        poll_timeout_value_(ctx->opts.next_byte_timeout_ms);
+    const bool draining = ctx->opts.drain;
+    int timeout         = first_timeout;
 
     int saw_data = 0;
     char chunk[4096];

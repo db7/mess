@@ -1,4 +1,4 @@
-// RUN: cat ../data/sample1.md | %b | %check
+// RUN: cat %S/data/sample1.md | %x | %check
 //
 // CHECK: [osc8] [0] (3,75)-(3,79)
 // CHECK-SAME: [osc8] [0] {{.*}} "OSC8"
@@ -69,8 +69,8 @@ main(void)
                         "[%s] [%zu] (%zu,%zu)-(%zu,%zu)"
                         " \"%s\" -> %s\n",
                         span->kind == LINKS_KIND_OSC8 ? "osc8" : "man",
-                        matches[mi], span->row, span->columns.start,
-                        span->row, span->columns.end, span->text, span->link);
+                        matches[mi], span->row, span->columns.start, span->row,
+                        span->columns.end, span->text, span->link);
                 }
                 free(matches);
             }

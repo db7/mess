@@ -1,8 +1,7 @@
-// RUN: cc %s -o %s.bin
-// RUN: env MESSPAGER=%s.bin %mess man://printf.3 | %check
-// CHECK: ARGS: %s.bin
-// CHECK: MESSFILE=(null)
-// CHECK: FIRST:PRINTF(3)
+// RUN: env PAGER=%x MESSPAGER=%x %mess %S/data/sample0.md | %check
+// CHECK: ARGS: %x
+// CHECK: MESSFILE=%S/data/sample0.md
+// CHECK: FIRST:sample
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,10 +13,8 @@ main(int argc, char **argv)
     for (int i = 0; i < argc; ++i)
         printf(" %s", argv[i]);
     printf("\n");
-
     const char *messfile = getenv("MESSFILE");
     printf("MESSFILE=%s\n", messfile ? messfile : "(null)");
-
     const char *path = (argc > 1) ? argv[1] : NULL;
     FILE *fp         = path ? fopen(path, "r") : stdin;
     char line[512];
@@ -27,6 +24,5 @@ main(int argc, char **argv)
         printf("FIRST:\n");
     if (fp && fp != stdin)
         fclose(fp);
-
     return 0;
 }

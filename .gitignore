@@ -3,6 +3,7 @@ compile_flags.txt
 *.dSYM
 *.orig
 *.o
+*.d
 mess
 simpler
 mess.1

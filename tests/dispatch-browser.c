@@ -1,6 +1,5 @@
-// RUN: cc %s -o %s.bin
-// RUN: env BROWSER=%s.bin %S/../../mess https://dispatcher.example | %check
-// CHECK: ARGS: %s.bin https://dispatcher.example
+// RUN: env BROWSER=%x %mess https://dispatcher.example | %check
+// CHECK: ARGS: %x https://dispatcher.example
 // CHECK: MESSFILE=(null)
 
 #include <stdio.h>

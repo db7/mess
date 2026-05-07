@@ -1,3 +1,4 @@
+// RUN: %x
 #include "uri.h"
 
 #include <assert.h>

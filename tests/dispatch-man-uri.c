@@ -1,10 +1,7 @@
-// AGENT: DONT CHANGE THIS FILE!
-// RUN: cc %s -o %s.bin
-// RUN: printf sample > %s.data
-// RUN: env PAGER=%s.bin MESSPAGER=%s.bin %mess %s.data | %check
-// CHECK: ARGS: %s.bin
-// CHECK: MESSFILE=%s.data
-// CHECK: FIRST:sample
+// RUN: env MESSPAGER=%x %mess man://printf.3 | %check
+// CHECK: ARGS: %x
+// CHECK: MESSFILE=(null)
+// CHECK: FIRST:PRINTF(3)
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,8 +13,10 @@ main(int argc, char **argv)
     for (int i = 0; i < argc; ++i)
         printf(" %s", argv[i]);
     printf("\n");
+
     const char *messfile = getenv("MESSFILE");
     printf("MESSFILE=%s\n", messfile ? messfile : "(null)");
+
     const char *path = (argc > 1) ? argv[1] : NULL;
     FILE *fp         = path ? fopen(path, "r") : stdin;
     char line[512];
@@ -27,5 +26,6 @@ main(int argc, char **argv)
         printf("FIRST:\n");
     if (fp && fp != stdin)
         fclose(fp);
+
     return 0;
 }

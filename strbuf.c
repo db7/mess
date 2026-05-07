@@ -31,8 +31,8 @@ strbuf_init(struct strbuf *sb, size_t initial_cap)
     sb->data = malloc(initial_cap);
     if (sb->data == NULL)
         return;
-    sb->cap    = initial_cap;
-    sb->data[0]= '\0';
+    sb->cap     = initial_cap;
+    sb->data[0] = '\0';
 }
 
 void
@@ -66,7 +66,7 @@ strbuf_reserve(struct strbuf *sb, size_t extra)
             sb->data = malloc(1);
             if (sb->data == NULL)
                 return -1;
-            sb->cap = 1;
+            sb->cap     = 1;
             sb->data[0] = '\0';
         }
         return 0;
@@ -76,9 +76,9 @@ strbuf_reserve(struct strbuf *sb, size_t extra)
         sb->data   = malloc(cap);
         if (sb->data == NULL)
             return -1;
-        sb->cap    = cap;
-        sb->len    = 0;
-        sb->data[0]= '\0';
+        sb->cap     = cap;
+        sb->len     = 0;
+        sb->data[0] = '\0';
         return 0;
     }
     if (sb->len > SIZE_MAX - extra - 1)
@@ -136,9 +136,9 @@ strbuf_detach(struct strbuf *sb)
     if (sb == NULL)
         return NULL;
     char *data = sb->data;
-    sb->data = NULL;
-    sb->len  = 0;
-    sb->cap  = 0;
+    sb->data   = NULL;
+    sb->len    = 0;
+    sb->cap    = 0;
     return data;
 }
 

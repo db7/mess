@@ -1,4 +1,4 @@
-// RUN: cat ../data/sample1.md | %b | %check
+// RUN: cat %S/data/sample1.md | %x | %check
 //
 // CHECK: https://gist.github.com/egmontkob/
 // CHECK: https://gist.github.com/egmontkob/

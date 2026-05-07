@@ -1,8 +1,6 @@
-// RUN: cc %s -o %s.bin
-// RUN: echo uri > %s.data
-// RUN: env PAGER=%s.bin MESSPAGER=%s.bin %mess file://%s.data | %check
-// CHECK: ARGS: %s.bin %s.data
-// CHECK: MESSFILE=%s.data
+// RUN: env PAGER=%x MESSPAGER=%x %mess file://%S/data/uri | %check
+// CHECK: ARGS: %x %S/data/uri
+// CHECK: MESSFILE=%S/data/uri
 // CHECK: FIRST:uri
 
 #include <stdio.h>

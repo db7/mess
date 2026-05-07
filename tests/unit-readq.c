@@ -1,4 +1,6 @@
+// RUN: %x
 #include "readq.h"
+
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -8,7 +10,7 @@
 static void
 write_all_(int fd, const char *data)
 {
-    size_t len = strlen(data);
+    size_t len      = strlen(data);
     ssize_t written = write(fd, data, len);
     assert(written == (ssize_t)len);
 }

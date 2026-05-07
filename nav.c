@@ -1,6 +1,7 @@
+#include "nav.h"
+
 #include "links.h"
 #include "log.h"
-#include "nav.h"
 #include "styler.h"
 
 #include <ctype.h>

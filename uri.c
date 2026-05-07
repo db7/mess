@@ -16,9 +16,9 @@ uri_is_markdown_path(const char *path)
 {
     if (!path)
         return false;
-    static const char *exts[] = {"md",   "markdown", "mdown", "mdwn",
-                                 "mkd",  "mkdn",     "mdtxt", "mdtext"};
-    const char *dot          = strrchr(path, '.');
+    static const char *exts[] = {"md",  "markdown", "mdown", "mdwn",
+                                 "mkd", "mkdn",     "mdtxt", "mdtext"};
+    const char *dot           = strrchr(path, '.');
     if (!dot || dot == path)
         return false;
     for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); ++i) {
@@ -146,7 +146,8 @@ uri_parse_man_uri(const char *uri, uri_man_topic *topic)
 
     size_t name_len    = (size_t)(dot - payload);
     size_t section_len = strlen(dot + 1);
-    if (name_len >= sizeof(topic->name) || section_len >= sizeof(topic->section))
+    if (name_len >= sizeof(topic->name) ||
+        section_len >= sizeof(topic->section))
         return false;
 
     memcpy(topic->name, payload, name_len);
@@ -199,11 +200,11 @@ uri_is_path(const uri_info *info)
     if (!info)
         return false;
     switch (info->type) {
-    case URI_KIND_MARKDOWN_FILE:
-    case URI_KIND_MAN_FILE:
-    case URI_KIND_FILE:
-        return true;
-    default:
-        return false;
+        case URI_KIND_MARKDOWN_FILE:
+        case URI_KIND_MAN_FILE:
+        case URI_KIND_FILE:
+            return true;
+        default:
+            return false;
     }
 }
