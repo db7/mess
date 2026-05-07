@@ -1,6 +1,6 @@
 // RUN: cc %s -o %s.bin
 // RUN: echo uri > %s.data
-// RUN: env PAGER=%s.bin %S/../../mess file://%s.data | %check
+// RUN: env PAGER=%s.bin MESSPAGER=%s.bin %mess file://%s.data | %check
 // CHECK: ARGS: %s.bin %s.data
 // CHECK: MESSFILE=%s.data
 // CHECK: FIRST:uri

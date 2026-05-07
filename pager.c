@@ -1,4 +1,5 @@
 #include "defs.h"
+#include "dispatcher.h"
 #include "log.h"
 #include "nav.h"
 #include "offscr.h"
@@ -35,14 +36,13 @@
 static bool set_raw_mode_(int fd, struct termios *out_prev);
 static void change_terminal_size_(int fd, int rows, int cols);
 static void get_terminal_size_(int fd, int *rows, int *cols);
-static bool handle_tty_pass_mode_(int child_fd, struct readq *tty_q,
-                                  int tty_fd);
+static bool handle_tty_pass_mode_(int child_fd, struct readq *tty_q);
 static bool install_winch_(void);
 static void handle_sigint_(int sig);
 static void handle_winch_signal_(int sig);
 static void exec_subpager_(void);
-static bool pager_enter_nav_mode_(int child_fd, int tty_fd);
-int parent_run_(pid_t child_pid, int master_fd, int tty_fd);
+static bool pager_enter_nav_mode_(int child_fd, struct readq *tty_q);
+int parent_run_(pid_t child_pid, int master_fd, int tty_fd, int parse_flags);
 
 // These global variables are only used because we have to handle signal
 
@@ -66,7 +66,6 @@ static struct nav *pager_nav_;
 int
 pager_run(int parse_flags)
 {
-    (void)parse_flags;
     // stdin stays a TTY when mess runs without upstream piping (e.g. invoked
     // directly from the shell or as a pager with the caller leaving stdin on
     // the controlling terminal), so we still need to handle that path.
@@ -145,7 +144,7 @@ pager_run(int parse_flags)
     slave_fd = -1;
 #endif
 
-    rc = parent_run_(pid, master_fd, tty_fd);
+    rc = parent_run_(pid, master_fd, tty_fd, parse_flags);
 out:
     if (tty_fd != -1 && raw_mode_set)
         tcsetattr(tty_fd, TCSAFLUSH, &prev_term);
@@ -164,11 +163,12 @@ out:
 // Parent functions
 // -----------------------------------------------------------------------------
 int
-parent_run_(pid_t child_pid, int master_fd, int tty_fd)
+parent_run_(pid_t child_pid, int master_fd, int tty_fd, int parse_flags)
 
 {
     struct nav_opts nav_opts = {
-        .debug_fd = STDERR_FILENO,
+        .parse_flags = parse_flags,
+        .self_cmd    = dispatcher_self_path(),
     };
     pager_nav_ = nav_create(&nav_opts);
     if (!pager_nav_) {
@@ -211,7 +211,7 @@ parent_run_(pid_t child_pid, int master_fd, int tty_fd)
         }
 
         if (FD_ISSET(tty_fd, &readfds)) {
-            if (!handle_tty_pass_mode_(master_fd, &tty_q, tty_fd))
+            if (!handle_tty_pass_mode_(master_fd, &tty_q))
                 goto out;
         }
 
@@ -241,24 +241,24 @@ out:
 
 // Process keyboard input from the controlling terminal.
 static bool
-handle_tty_pass_mode_(int child_fd, struct readq *tty_queue, int tty_fd)
+handle_tty_pass_mode_(int child_fd, struct readq *tty_q)
 {
     if (pager_quit_requested_)
         return true;
 
-    if (!readq_refill(tty_queue))
+    if (!readq_refill(tty_q))
         return true;
 
     bool trigger_nav = false;
-    while (readq_len(tty_queue) > 0) {
-        int ch = readq_get_next(tty_queue);
+    while (readq_len(tty_q) > 0) {
+        int ch = readq_pick_byte(tty_q);
         if (ch < 0)
             break;
         if (ch == MESS_ENTER_HOTKEY) {
             trigger_nav = true;
             break;
         }
-        char out = (char)ch;
+        char out = (char)readq_get_next(tty_q);
         if (write(child_fd, &out, 1) == -1) {
             perror("write to child");
             return false;
@@ -266,11 +266,11 @@ handle_tty_pass_mode_(int child_fd, struct readq *tty_queue, int tty_fd)
     }
 
     if (trigger_nav) {
-        if (!pager_enter_nav_mode_(child_fd, tty_fd))
+        if (!pager_enter_nav_mode_(child_fd, tty_q))
             return false;
     }
 
-    readq_clear(tty_queue);
+    readq_clear(tty_q);
     return true;
 }
 
@@ -299,7 +299,7 @@ drain_and_clear_fd_(int fd)
 }
 
 static bool
-pager_enter_nav_mode_(int child_fd, int tty_fd)
+pager_enter_nav_mode_(int child_fd, struct readq *tty_q)
 {
     if (!pager_nav_) {
         fprintf(stderr, "navigation unavailable\n");
@@ -343,14 +343,13 @@ pager_enter_nav_mode_(int child_fd, int tty_fd)
         log_debug("snap row %zu: %s", r, row);
         free(row);
     }
-    struct readq input;
-    readq_init(&input, tty_fd);
-
-    log_debug("nav: tty_fd=%d", tty_fd);
+    int tty_fd = readq_fd(tty_q);
+    log_debug("nav: tty_fd=%d", tty_q);
     if (fcntl(tty_fd, F_GETFL) == -1) {
         log_debug("nav: invalid tty_fd (%d errno=%d)", tty_fd, errno);
         return false;
     }
+    log_debug("nav: next command='%c'", readq_pick_byte(tty_q));
     log_debug("nav: view size=%zu", view.len);
     size_t dump_len = view.len < 128 ? view.len : 128;
     if (dump_len > 0) {
@@ -376,7 +375,7 @@ pager_enter_nav_mode_(int child_fd, int tty_fd)
 
     log_debug("nav: running nav_run");
     nav_result_t rc =
-        nav_run(pager_nav_, &view, &input, STDOUT_FILENO, width, true);
+        nav_run(pager_nav_, &view, tty_q, STDOUT_FILENO, width, true);
     switch (rc) {
         case NAV_RESULT_STOP:
             log_debug("nav: stop");
@@ -411,39 +410,30 @@ pager_enter_nav_mode_(int child_fd, int tty_fd)
 static void
 exec_subpager_(void)
 {
-#if 0
     const char *cmd = getenv("MESSPAGER");
-    if (!cmd || !cmd[0])
-        cmd = getenv("PAGER");
-    if (!cmd || !cmd[0])
+    if (cmd == NULL || cmd[0] == '\0') {
+        const char *pager_env = getenv("PAGER");
+        if (pager_env && pager_env[0] &&
+            !dispatcher_command_is_self(pager_env)) {
+            cmd = pager_env;
+        }
+    }
+    if (cmd == NULL || cmd[0] == '\0')
         cmd = "less -R";
 
     wordexp_t we;
     if (wordexp(cmd, &we, WRDE_NOCMD) != 0) {
         fprintf(stderr, "mess: unable to parse pager command '%s'\n", cmd);
-        return -1;
+        _exit(127);
     }
-    size_t count = we.we_wordc;
-    char **argv  = calloc(count + 1, sizeof(char *));
-    if (!argv) {
+    if (we.we_wordc == 0 || we.we_wordv == NULL || we.we_wordv[0] == NULL) {
         wordfree(&we);
-        return -1;
+        _exit(127);
     }
-    for (size_t i = 0; i < count; ++i) {
-        argv[i] = strdup(we.we_wordv[i]);
-        if (!argv[i]) {
-            for (size_t j = 0; j < i; ++j)
-                free(argv[j]);
-            free(argv);
-            wordfree(&we);
-            return -1;
-        }
-    }
-    argv[count] = NULL;
 
+    execvp(we.we_wordv[0], we.we_wordv);
+    perror(we.we_wordv[0]);
     wordfree(&we);
-#endif
-    execlp("less", "less", "-R", 0);
     _exit(127);
 }
 

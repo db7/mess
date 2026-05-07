@@ -25,6 +25,13 @@ bool readq_is_empty(struct readq *q);
 const char *readq_last_ptr(const struct readq *q);
 size_t readq_last_len(const struct readq *q);
 size_t readq_available_bytes(const struct readq *);
+
+static inline int
+readq_fd(const struct readq *q)
+{
+    return q->fd;
+}
+
 static inline const char *
 readq_data(const struct readq *q)
 {

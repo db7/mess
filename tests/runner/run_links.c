@@ -1,16 +1,16 @@
 // RUN: cat ../data/sample1.md | %b | %check
 //
-// CHECK: [osc8] [0] (3,75)-(3,90)
+// CHECK: [osc8] [0] (3,75)-(3,79)
 // CHECK-SAME: [osc8] [0] {{.*}} "OSC8"
 // CHECK-SAME: [osc8] [0] {{.*}} https://gist.github.com/egmontkob/
 //
-// CHECK: [osc8] [1] (4,4)-(4,24)
+// CHECK: [osc8] [1] (4,4)-(4,13)
 // CHECK-SAME: [osc8] [1] {{.*}} "sequences"
 // CHECK-SAME: [osc8] [1] {{.*}} https://gist.github.com/egmontkob/
 //
-// CHECK: [osc8] [2] (6,70)-(6,85) "lynx" -> https://lynx.browser.org/
+// CHECK: [osc8] [2] (6,70)-(6,74) "lynx" -> https://lynx.browser.org/
 //
-// CHECK: [osc8] [3] (6,91)-(6,109) "lowdown"
+// CHECK: [osc8] [3] (6,80)-(6,87) "lowdown"
 // CHECK-SAME: [osc8] [3] {{.*}} https://kristaps.bsd.lv/lowdown/
 //
 // CHECK: [man] [4] (8,34)-(8,44)

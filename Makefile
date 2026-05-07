@@ -76,7 +76,8 @@ test: $(TARGETS) $(TESTS_BIN)
 		fi; \
 	done
 	@for f in tests/dispatcher/*.c; do \
-		tikl -v -c tests/dispatcher/tikl.conf $$f; \
+		set -e; \
+		tikl -c tests/dispatcher/tikl.conf $$f; \
 	done
 	${MAKE} -C tests/runner all test
 

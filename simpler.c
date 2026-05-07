@@ -77,7 +77,8 @@ main(void)
     log_init(STDERR_FILENO);
 
     struct nav_opts nav_opts = {
-        .debug_fd = STDERR_FILENO,
+        .parse_flags = PAGER_PARSE_OSC8 | PAGER_PARSE_MAN,
+        .self_cmd    = NULL,
     };
     global_nav = nav_create(&nav_opts);
     if (!global_nav) {

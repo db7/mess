@@ -5,6 +5,7 @@
 #define NAV_H
 
 #include "offscr.h"
+#include "pager.h"
 #include "readq.h"
 
 #include <stdbool.h>
@@ -13,7 +14,8 @@
 struct nav;
 
 struct nav_opts {
-    int debug_fd;
+    int parse_flags;
+    const char *self_cmd;
 };
 
 enum nav_result {
@@ -28,8 +30,8 @@ typedef enum nav_result nav_result_t;
 
 struct nav *nav_create(const struct nav_opts *);
 void nav_destroy(struct nav *);
-nav_result_t nav_run(struct nav *, const struct offscr_view *,
-                     struct readq *, int out_fd, size_t width, bool redraw);
+nav_result_t nav_run(struct nav *, const struct offscr_view *, struct readq *,
+                     int out_fd, size_t width, bool redraw);
 void nav_cancel(struct nav *);
 
 #endif /* NAV_H */

@@ -1,9 +1,9 @@
 // AGENT: DONT CHANGE THIS FILE!
 // RUN: cc %s -o %s.bin
 // RUN: printf sample > %s.data
-// RUN: env PAGER=%s.bin %mess < %s.data | %check
+// RUN: env PAGER=%s.bin MESSPAGER=%s.bin %mess %s.data | %check
 // CHECK: ARGS: %s.bin
-// CHECK: MESSFILE=(null)
+// CHECK: MESSFILE=%s.data
 // CHECK: FIRST:sample
 
 #include <stdio.h>

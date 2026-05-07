@@ -31,9 +31,10 @@ static const char *default_pager_(void);
 static const char *default_browser_(void);
 static const char *default_markdown_renderer_(void);
 static const char *pager_command_env_(void);
-static bool pager_is_self_(const char *cmd);
+bool dispatcher_command_is_self(const char *cmd);
 static void ensure_manpager_(void);
 static char *shell_quote_(const char *text);
+static void set_mess_uri_env_(const char *uri);
 
 // Absolute path to the running mess binary when known.
 static char self_path_[PATH_MAX];
@@ -58,6 +59,8 @@ dispatcher_run(const char *target)
     if (uri_is_path(&info)) {
         if (set_messfile_env_(info.path) != 0)
             return -1;
+    } else {
+        set_mess_uri_env_(info.raw);
     }
 
     switch (info.type) {
@@ -97,6 +100,15 @@ set_messfile_env_(const char *path)
     return 0;
 }
 
+static void
+set_mess_uri_env_(const char *uri)
+{
+    if (!uri || !uri[0])
+        return;
+    if (setenv("MESS_URI", uri, 1) == -1)
+        perror("setenv MESS_URI");
+}
+
 // Derive the pager command when none is specified in the environment.
 static const char *
 default_pager_(void)
@@ -129,7 +141,7 @@ default_browser_(void)
 static const char *
 default_markdown_renderer_(void)
 {
-    return "lowdown -tterm --term-no-links";
+    return "mdcat";
 }
 
 // Look up the pager command from environment variables, falling back as needed.
@@ -140,14 +152,14 @@ pager_command_env_(void)
     if (cmd && *cmd)
         return cmd;
     cmd = getenv("PAGER");
-    if (cmd && *cmd && !pager_is_self_(cmd))
+    if (cmd && *cmd && !dispatcher_command_is_self(cmd))
         return cmd;
     return NULL;
 }
 
 // Test whether the configured pager command resolves back to mess itself.
-static bool
-pager_is_self_(const char *cmd)
+bool
+dispatcher_command_is_self(const char *cmd)
 {
     if (!cmd)
         return false;
@@ -162,18 +174,36 @@ pager_is_self_(const char *cmd)
     return (len == 4 && strncmp(cmd, "mess", 4) == 0);
 }
 
+const char *
+dispatcher_self_path(void)
+{
+    if (have_self_path_)
+        return self_path_;
+    return NULL;
+}
+
 
 // Tokenise the command string originating from the environment.
 static int
 build_command_from_env_(const char *env, const char *fallback, wordexp_t *we)
 {
-    const char *cmd = (env && *env) ? env : fallback;
-    if (!cmd)
-        cmd = fallback;
-    int rc = wordexp(cmd, we, WRDE_NOCMD);
-    if (rc != 0)
+    const char *candidates[3] = {NULL, NULL, NULL};
+    if (env && *env)
+        candidates[0] = env;
+    candidates[1] = fallback;
+    if (fallback && strcmp(fallback, "mdcat") == 0)
+        candidates[2] = "lowdown -tterm --term-no-links";
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
+        const char *cmd = candidates[i];
+        if (!cmd || !*cmd)
+            continue;
+        int rc = wordexp(cmd, we, WRDE_NOCMD);
+        if (rc == 0)
+            return 0;
         fprintf(stderr, "mess: unable to parse command '%s'\n", cmd);
-    return rc;
+    }
+    errno = EINVAL;
+    return -1;
 }
 
 // Run a Markdown renderer and pipe its output into the configured pager.
@@ -194,9 +224,6 @@ run_markdown_file_(const char *path)
         renderer_argv[i] = render_we.we_wordv[i];
     renderer_argv[render_we.we_wordc]     = (char *)path;
     renderer_argv[render_we.we_wordc + 1] = NULL;
-
-    for (size_t i = 0; i < render_we.we_wordc + 1; ++i)
-        printf("%s\n", renderer_argv[i]);
 
     const char *pager_env = pager_command_env_();
     wordexp_t we;

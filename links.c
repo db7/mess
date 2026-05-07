@@ -63,6 +63,10 @@ record_span_(struct link_iter *res, const char *link_begin, size_t link_len,
     return 0;
 }
 
+static int man_is_name_char_(char ch);
+static int man_is_section_char_(char ch);
+static int man_name_all_upper_(const char *name, size_t len);
+
 static int
 man_is_name_char_(char ch)
 {
@@ -73,6 +77,21 @@ static int
 man_is_section_char_(char ch)
 {
     return isalnum((unsigned char)ch) || ch == '.' || ch == '_';
+}
+
+static int
+man_name_all_upper_(const char *name, size_t len)
+{
+    int saw_alpha = 0;
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char ch = (unsigned char)name[i];
+        if (isalpha(ch)) {
+            saw_alpha = 1;
+            if (!isupper(ch))
+                return 0;
+        }
+    }
+    return saw_alpha;
 }
 
 static size_t
@@ -273,6 +292,11 @@ parse_links_man(const char *buf, size_t len, const size_t *row_offsets,
                           &section_offset, &section_len, &token_len)) {
             const char *name    = plain_data + cur;
             const char *section = plain_data + cur + section_offset;
+            if (man_name_all_upper_(name, name_len)) {
+                col += token_len;
+                cur += token_len;
+                continue;
+            }
             char link_buf[128];
             size_t link_len = man_format_link_(link_buf, sizeof(link_buf), name,
                                                name_len, section, section_len);

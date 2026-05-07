@@ -1,7 +1,9 @@
 #include "dispatcher.h"
+#include "log.h"
 #include "pager.h"
 #include "version.h"
 
+#include <fcntl.h>
 #include <getopt.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -26,6 +28,7 @@ main(int argc, char *argv[])
     bool enable_osc8     = false;
     bool enable_man      = false;
     const char *open_arg = NULL;
+    const char *log_path = NULL;
 
     // Supported long-form command-line options for getopt_long().
     static const struct option long_opts[] = {
@@ -38,7 +41,7 @@ main(int argc, char *argv[])
 
     opterr = 0;
     int opt;
-    while ((opt = getopt_long(argc, argv, "hVOom", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "hVOoml:", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'h':
                 usage_(argv[0]);
@@ -55,6 +58,9 @@ main(int argc, char *argv[])
             case 'm':
                 enable_man = true;
                 break;
+            case 'l':
+                log_path = optarg;
+                break;
             default:
                 usage_(argv[0]);
                 return EXIT_FAILURE;
@@ -68,11 +74,32 @@ main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    if (log_path) {
+        if (setenv("MESS_LOG", log_path, 1) == -1) {
+            perror("setenv MESS_LOG");
+            return EXIT_FAILURE;
+        }
+    }
+
+    const char *log_target = log_path ? log_path : getenv("MESS_LOG");
+    int log_fd             = -1;
+    if (log_target && *log_target) {
+        log_fd = open(log_target, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (log_fd == -1)
+            perror("open MESS_LOG");
+    }
+    log_init(log_fd);
+
     if (open_arg)
         return dispatcher_run(open_arg);
 
     if (optind < argc)
         return dispatcher_run(argv[optind]);
+
+    if (isatty(STDIN_FILENO)) {
+        fprintf(stderr, "mess: no input, use 'mess <file|uri>'\n");
+        return EXIT_FAILURE;
+    }
 
     int parse_flags = 0;
     if (enable_osc8)
