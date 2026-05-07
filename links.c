@@ -435,8 +435,12 @@ parse_links_osc8(const char *buf, size_t len, const size_t *row_offsets,
             if (text_end == NULL)
                 break;
 
-            size_t link_len     = (size_t)(link_end - link_start);
-            size_t text_span    = (size_t)(text_end - text_start);
+            size_t link_len  = (size_t)(link_end - link_start);
+            size_t text_span = (size_t)(text_end - text_start);
+            if (link_len == 0) {
+                i = (size_t)((link_end + 2) - buf);
+                continue;
+            }
             struct strbuf plain = STRBUF_INIT;
             size_t plain_len    = 0;
             if (strip_decorations_(text_start, text_span, &plain, NULL,

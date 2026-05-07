@@ -1,5 +1,5 @@
 // RUN: env PAGER=%x MESSPAGER=%x %mess file://%(realpath %S/data/uri) | %check
-// CHECK: ARGS: %x {{.*}}/data/uri
+// CHECK: ARGS: %x
 // CHECK: MESSFILE={{.*}}/data/uri
 // CHECK: FIRST:{{ *}}uri
 
@@ -16,13 +16,13 @@ main(int argc, char **argv)
     const char *messfile = getenv("MESSFILE");
     printf("MESSFILE=%s\n", messfile ? messfile : "(null)");
     const char *path = (argc > 1) ? argv[1] : NULL;
-    FILE *fp         = path ? fopen(path, "r") : NULL;
+    FILE *fp         = path ? fopen(path, "r") : stdin;
     char line[512];
     if (fp && fgets(line, sizeof line, fp))
         printf("FIRST:%s", line);
     else
         printf("FIRST:\n");
-    if (fp)
+    if (fp && fp != stdin)
         fclose(fp);
     return 0;
 }

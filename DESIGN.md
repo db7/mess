@@ -50,10 +50,11 @@ touches stdin and instead decides which helper to spawn:
 - `man://` topics and manual files go through the system `man`, with `MANPAGER`
   set so downstream invocations still reach `mess -m`.
 - Markdown files run through the configured renderer (`MESS_MDRENDER`,
-  defaulting to `mdcat` with a fallback to `lowdown`) and the renderer’s output
-  is piped into the pager command selected via `MESSPAGER`/`PAGER`.
-- Everything else either launches a pager directly or forwards to the platform
-  browser (`open`/`xdg-open`).
+  defaulting to `mdcat` with a fallback to `lowdown`) and the renderer’s
+  output is piped into `mess -m -o`, so link navigation stays active while the
+  wrapper still honors `MESSPAGER`/`PAGER` for its downstream pager.
+- Regular files are opened on stdin through the same wrapper path. Everything
+  else forwards to the platform browser (`open`/`xdg-open`).
 
 Dispatcher mode is intentionally thinner: it prepares data for the real pager
 and hands control off, while pager mode is responsible for PTY juggling,

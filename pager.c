@@ -380,6 +380,10 @@ pager_enter_nav_mode_(int child_fd, struct readq *tty_q)
     switch (rc) {
         case NAV_RESULT_STOP:
             log_debug("nav: stop");
+            if (readq_len(tty_q) > 0) {
+                if (write(child_fd, readq_data(tty_q), readq_len(tty_q)) == -1)
+                    perror("write pending input");
+            }
             break;
         case NAV_RESULT_REFRESH:
             log_debug("nav: refresh");

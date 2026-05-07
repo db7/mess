@@ -122,6 +122,28 @@ test_iter_match_and_next(void)
 }
 
 static void
+test_empty_osc8_close_is_ignored(void)
+{
+    const char sample[] =
+        "Here I found the debouncer code: \x1b]8;;\x1b\\\n"
+        "    \x1b]8;;https://example.com/debouncer\x1b\\"
+        "https://example.com/debouncer\x1b]8;;\x1b\\";
+    struct offscr_view view = {
+        .data      = sample,
+        .len       = strlen(sample),
+        .truncated = 0,
+    };
+    struct link_iter iter = {0};
+    assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
+    assert(iter.count == 1);
+    assert(iter.spans[0].row == 1);
+    assert(iter.spans[0].columns.start == 4);
+    assert(strcmp(iter.spans[0].link, "https://example.com/debouncer") == 0);
+    assert(strcmp(iter.spans[0].text, "https://example.com/debouncer") == 0);
+    link_iter_free(&iter);
+}
+
+static void
 test_parse_multiple_modes(void)
 {
     const char sample[] =
@@ -190,6 +212,7 @@ main(void)
     test_parse_simple_snapshot();
     test_parse_positions();
     test_iter_match_and_next();
+    test_empty_osc8_close_is_ignored();
     test_parse_multiple_modes();
     test_mixed_link_order();
     test_colored_man_token();

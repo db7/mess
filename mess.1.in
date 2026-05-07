@@ -144,7 +144,7 @@ selected entry prefixed with
 .BR => .
 Use the following keys while the pager is running:
 .TP
-.B Tab / j
+.B Tab
 Cycle through the discovered links in display order.
 .TP
 .B Enter
@@ -153,8 +153,14 @@ Open the highlighted link using the configured launcher (see
 under
 .BR ENVIRONMENT ).
 .TP
-.B Shift-Tab / k
+.B Shift-Tab
 Cycle backwards through the discovered links.
+.TP
+.B h / j / k / l
+Move spatially between links: left, down, up, and right. Vertical movement
+prefers links whose column range overlaps the current selection, then falls
+back to the nearest column. Horizontal movement falls through to the previous
+or next row when there is no link left or right of the current selection.
 .TP
 .B v
 Open the document referenced by the
@@ -170,7 +176,8 @@ requests a redraw from the pager to refresh the screen. When
 is launched with a positional file/URI it sets
 .B MESSFILE
 before spawning the pager; wrapper mode (`... | mess`) can export it manually
-so the shortcut knows which path to edit.
+so the shortcut knows which path to edit. The selected link's captured
+display row is passed as a `+line` editor argument when available.
 .TP
 .B c
 Toggle inline link coloring, assigning a distinct ANSI color to each stored
@@ -195,8 +202,8 @@ Clear the selection and resume normal pager input.
 Exit navigation mode without launching the current link, then request a pager
 refresh.
 .PP
-Any other key is forwarded to the pager unchanged. The selection persists until
-cleared explicitly or a new buffer is viewed.
+Any other key exits navigation mode and is forwarded to the pager unchanged.
+The selection persists until cleared explicitly or a new buffer is viewed.
 .SH ENVIRONMENT
 .TP
 .B PAGER
@@ -239,8 +246,9 @@ Command invoked when pressing
 .B v
 during navigation. The value is expanded via
 .BR wordexp (3)
-before appending the current document path. The default fallback is the
-traditional
+before appending a `+line` argument and the current document path. The line is
+the selected link's captured display row, so rendered formats such as Markdown
+may not map exactly back to source lines. The default fallback is the traditional
 .BR vi (1)
 when neither variable is set.
 .TP

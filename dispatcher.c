@@ -31,7 +31,6 @@ static int wait_for_child_(pid_t pid);
 static const char *default_pager_(void);
 static const char *default_browser_(void);
 static const char *default_markdown_renderer_(void);
-static const char *pager_command_env_(void);
 bool dispatcher_command_is_self(const char *cmd);
 static void ensure_manpager_(void);
 static char *shell_quote_(const char *text);
@@ -110,7 +109,7 @@ set_mess_uri_env_(const char *uri)
         perror("setenv MESS_URI");
 }
 
-// Derive the pager command when none is specified in the environment.
+// Derive the mess wrapper command used for file targets.
 static const char *
 default_pager_(void)
 {
@@ -143,19 +142,6 @@ static const char *
 default_markdown_renderer_(void)
 {
     return "mdcat";
-}
-
-// Look up the pager command from environment variables, falling back as needed.
-static const char *
-pager_command_env_(void)
-{
-    const char *cmd = getenv("MESSPAGER");
-    if (cmd && *cmd)
-        return cmd;
-    cmd = getenv("PAGER");
-    if (cmd && *cmd && !dispatcher_command_is_self(cmd))
-        return cmd;
-    return NULL;
 }
 
 // Test whether the configured pager command resolves back to mess itself.
@@ -226,9 +212,8 @@ run_markdown_file_(const char *path)
     renderer_argv[render_we.we_wordc]     = (char *)path;
     renderer_argv[render_we.we_wordc + 1] = NULL;
 
-    const char *pager_env = pager_command_env_();
     wordexp_t we;
-    if (build_command_from_env_(pager_env, default_pager_(), &we) != 0) {
+    if (build_command_from_env_(NULL, default_pager_(), &we) != 0) {
         free(renderer_argv);
         wordfree(&render_we);
         return -1;
@@ -302,32 +287,24 @@ run_markdown_file_(const char *path)
 static int
 run_pager_file_(const char *path)
 {
-    const char *pager_env = pager_command_env_();
     wordexp_t we;
-    if (build_command_from_env_(pager_env, default_pager_(), &we) != 0)
+    if (build_command_from_env_(NULL, default_pager_(), &we) != 0)
         return -1;
-    bool have_external = (pager_env && *pager_env);
-    char **argv = calloc(we.we_wordc + (have_external ? 2 : 1), sizeof(char *));
+    char **argv = calloc(we.we_wordc + 1, sizeof(char *));
     if (!argv) {
         wordfree(&we);
         return -1;
     }
     for (size_t i = 0; i < we.we_wordc; ++i)
         argv[i] = we.we_wordv[i];
-    int rc = 0;
-    if (have_external) {
-        argv[we.we_wordc]     = (char *)path;
-        argv[we.we_wordc + 1] = NULL;
-        rc                    = run_simple_(argv);
+    int rc            = 0;
+    argv[we.we_wordc] = NULL;
+    int fd            = open(path, O_RDONLY);
+    if (fd == -1) {
+        perror(path);
+        rc = -1;
     } else {
-        argv[we.we_wordc] = NULL;
-        int fd            = open(path, O_RDONLY);
-        if (fd == -1) {
-            perror(path);
-            rc = -1;
-        } else {
-            rc = run_simple_with_stdin_(argv, fd);
-        }
+        rc = run_simple_with_stdin_(argv, fd);
     }
     free(argv);
     wordfree(&we);

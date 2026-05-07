@@ -33,6 +33,7 @@ enum nav_action_type {
 struct nav_action {
     enum nav_action_type type;
     size_t row;
+    size_t line;
     char *content;
     char *uri;
     bool is_skip;
@@ -63,6 +64,7 @@ struct nav_state {
     struct link_iter prev;
     struct link_iter cur;
     size_t baseline_row;
+    size_t last_logical_row;
     size_t screen_cols;
     int out_fd;
     bool status_visible;
@@ -76,6 +78,12 @@ static bool env_flag_enabled_(const char *name, bool default_value);
 
 static void cycle_link_(struct nav_state *state, int direction,
                         struct nav_action_list *actions);
+static bool move_link_spatial_(struct nav_state *state, int dx, int dy,
+                               struct nav_action_list *actions);
+static bool select_link_at_(struct nav_state *state, size_t target,
+                            struct nav_action_list *actions);
+static size_t current_block_end_(struct nav_state *state, size_t start);
+static bool index_in_block_(size_t idx, size_t start, size_t end, size_t count);
 static size_t step_index_(size_t idx, size_t count, int direction);
 static size_t find_block_start_(struct nav_state *state, size_t idx);
 static size_t collect_block_(struct nav_state *state, size_t start_idx,
@@ -87,6 +95,11 @@ static void append_plain_history_backward_(struct nav_state *state,
                                            size_t target,
                                            struct nav_action_list *actions);
 static bool urls_equal_(const char *a, const char *b);
+static size_t nav_status_row_(const struct offscr_view *view, size_t width);
+static size_t nav_visual_row_for_logical_(const struct offscr_view *view,
+                                          size_t width, size_t target_row);
+static size_t nav_visual_rows_for_logical_(const struct nav_state *state,
+                                           size_t row);
 static char *render_line_for_span_(const struct nav_state *state,
                                    const struct link_span *span);
 static char *render_plain_line_(const struct nav_state *state,
@@ -94,24 +107,28 @@ static char *render_plain_line_(const struct nav_state *state,
 static void append_replace_line_action_(struct nav_action_list *actions,
                                         size_t row, char *line, bool is_skip);
 static void append_uri_action_(struct nav_action_list *actions,
-                               enum nav_action_type type, const char *uri);
+                               enum nav_action_type type, const char *uri,
+                               size_t line);
 static void apply_actions_(struct nav_state *state,
                            const struct nav_action *actions);
 static bool execute_uri_actions_(struct nav_state *state,
                                  const struct nav_action *actions);
 static void open_uri_with_mess_(const struct nav_state *state, const char *uri);
-static void edit_with_editor_(const char *fallback_path);
+static void edit_with_editor_(const char *fallback_path, size_t line);
+static bool editor_expects_position_after_file_(const char *cmd);
 static void nav_log_actions_(const struct nav_state *state,
                              const struct nav_action *actions);
 static void nav_free_actions(struct nav_action *);
 static struct nav_process_result nav_process_input_(struct nav_state *,
                                                     struct readq *);
 static void nav_draw_status_bar_(struct nav_state *state);
+static void nav_restore_active_selection_(struct nav_state *state);
 static void nav_status_clear_(struct nav_state *state);
 static void nav_render_full_screen_(struct nav_state *state);
 static void nav_show_status_message_(struct nav_state *state,
                                      const char *message);
 static const char *nav_selected_link_(const struct nav_state *state);
+static bool consume_shift_tab_(struct readq *rq);
 #define NAV_NEXT_LINK_HOTKEY '\t'
 
 static bool
@@ -183,12 +200,12 @@ nav_run(struct nav *nav, const struct offscr_view *view, struct readq *rq,
     }
 
     struct nav_state state = {
-        .owner          = nav,
-        .view           = view,
-        .rq             = rq,
-        .out_fd         = out_fd,
-        .screen_cols    = width,
-        .status_visible = false,
+        .owner               = nav,
+        .view                = view,
+        .rq                  = rq,
+        .out_fd              = out_fd,
+        .screen_cols         = width,
+        .status_visible      = false,
         .show_link_in_status = nav->show_status_link,
         .has_active_link     = false,
     };
@@ -210,11 +227,12 @@ nav_run(struct nav *nav, const struct offscr_view *view, struct readq *rq,
     }
     state.cur = state.prev;
 
-    state.baseline_row = 0;
+    state.last_logical_row = 0;
     for (size_t i = 0; i < view->len; ++i) {
         if (view->data[i] == '\n')
-            state.baseline_row++;
+            state.last_logical_row++;
     }
+    state.baseline_row = nav_status_row_(view, state.screen_cols);
 
     if (redraw) {
         const char reset_seq[] = "\x1b[2J\x1b[H";
@@ -329,6 +347,11 @@ nav_process_input_(struct nav_state *state, struct readq *rq)
     while (readq_available_bytes(rq) > 0) {
         unsigned char byte = (unsigned char)rq->buffer[rq->start];
 
+        if (byte == '\x1b' && consume_shift_tab_(rq)) {
+            cycle_link_(state, -1, &actions);
+            continue;
+        }
+
         if (byte == '\x03' || byte == '\x1b') {
             rq->start++;
             result.status = NAV_PROCESS_STOP;
@@ -341,14 +364,38 @@ nav_process_input_(struct nav_state *state, struct readq *rq)
             break;
         }
 
-        if (byte == ' ' || byte == NAV_NEXT_LINK_HOTKEY) {
+        if (byte == NAV_NEXT_LINK_HOTKEY) {
             cycle_link_(state, +1, &actions);
             rq->start++;
             continue;
         }
 
-        if (byte == '\x7f' || byte == '\b') {
-            cycle_link_(state, -1, &actions);
+        if (byte == 'h' || byte == 'H') {
+            move_link_spatial_(state, -1, 0, &actions);
+            rq->start++;
+            continue;
+        }
+
+        if (byte == 'j' || byte == 'J') {
+            if (!move_link_spatial_(state, 0, +1, &actions)) {
+                result.status = NAV_PROCESS_STOP;
+                break;
+            }
+            rq->start++;
+            continue;
+        }
+
+        if (byte == 'k' || byte == 'K') {
+            if (!move_link_spatial_(state, 0, -1, &actions)) {
+                result.status = NAV_PROCESS_STOP;
+                break;
+            }
+            rq->start++;
+            continue;
+        }
+
+        if (byte == 'l' || byte == 'L') {
+            move_link_spatial_(state, +1, 0, &actions);
             rq->start++;
             continue;
         }
@@ -359,7 +406,8 @@ nav_process_input_(struct nav_state *state, struct readq *rq)
                 span = links_get(&state->prev,
                                  state->prev.index % state->prev.count);
             if (span && span->link)
-                append_uri_action_(&actions, NAV_ACTION_OPEN_URI, span->link);
+                append_uri_action_(&actions, NAV_ACTION_OPEN_URI, span->link,
+                                   0);
             rq->start++;
             continue;
         }
@@ -370,7 +418,8 @@ nav_process_input_(struct nav_state *state, struct readq *rq)
                 span = links_get(&state->prev,
                                  state->prev.index % state->prev.count);
             if (span && span->link)
-                append_uri_action_(&actions, NAV_ACTION_EDIT_URI, span->link);
+                append_uri_action_(&actions, NAV_ACTION_EDIT_URI, span->link,
+                                   span->row + 1);
             rq->start++;
             continue;
         }
@@ -385,7 +434,8 @@ nav_process_input_(struct nav_state *state, struct readq *rq)
             log_debug("input: '%c' (0x%02x)", byte, byte);
         else
             log_debug("input: 0x%02x", byte);
-        rq->start++;
+        result.status = NAV_PROCESS_STOP;
+        break;
     }
 
     if (rq->start == rq->end) {
@@ -395,6 +445,20 @@ nav_process_input_(struct nav_state *state, struct readq *rq)
 
     result.actions = actions.head;
     return result;
+}
+
+static bool
+consume_shift_tab_(struct readq *rq)
+{
+    if (!rq)
+        return false;
+    size_t available = readq_available_bytes(rq);
+    const char *buf  = rq->buffer + rq->start;
+    if (available >= 3 && buf[0] == '\x1b' && buf[1] == '[' && buf[2] == 'Z') {
+        rq->start += 3;
+        return true;
+    }
+    return false;
 }
 
 static void
@@ -421,6 +485,218 @@ cycle_link_(struct nav_state *state, int direction,
         state->cur.index = block_end;
     else
         state->cur.index = idx;
+}
+
+static size_t
+span_col_start_(const struct link_span *span)
+{
+    return span ? span->columns.start : 0;
+}
+
+static size_t
+span_col_end_(const struct link_span *span)
+{
+    if (!span)
+        return 0;
+    return span->columns.end > span->columns.start ? span->columns.end :
+                                                     span->columns.start + 1;
+}
+
+static size_t
+span_col_center_(const struct link_span *span)
+{
+    size_t start = span_col_start_(span);
+    size_t end   = span_col_end_(span);
+    return start + (end - start) / 2;
+}
+
+static size_t
+column_distance_(size_t col, const struct link_span *span)
+{
+    size_t start = span_col_start_(span);
+    size_t end   = span_col_end_(span);
+    if (col < start)
+        return start - col;
+    if (col >= end)
+        return col - (end - 1);
+    return 0;
+}
+
+static bool
+spatial_target_(struct nav_state *state, int dx, int dy, size_t *target)
+{
+    if (!state || !target || state->cur.count == 0)
+        return false;
+
+    size_t count   = state->cur.count;
+    size_t current = state->has_active_link ? state->prev.index % count :
+                                              state->cur.index % count;
+    const struct link_span *cur_span = links_get(&state->cur, current);
+    if (!cur_span)
+        return false;
+
+    size_t block_start = find_block_start_(state, current);
+    size_t block_end   = current_block_end_(state, block_start);
+    size_t cur_start   = span_col_start_(cur_span);
+    size_t cur_end     = span_col_end_(cur_span);
+    size_t cur_center  = span_col_center_(cur_span);
+
+    bool found       = false;
+    size_t best      = 0;
+    size_t best_row  = (size_t)-1;
+    size_t best_col  = (size_t)-1;
+    size_t best_bias = (size_t)-1;
+
+    for (size_t idx = 0; idx < count; ++idx) {
+        if (index_in_block_(idx, block_start, block_end, count))
+            continue;
+
+        const struct link_span *span = links_get(&state->cur, idx);
+        if (!span)
+            continue;
+
+        size_t row_dist = 0;
+        size_t col_dist = 0;
+        size_t bias     = idx;
+
+        if (dx < 0) {
+            if (span->row == cur_span->row) {
+                if (span_col_end_(span) > cur_start)
+                    continue;
+                row_dist = 0;
+                col_dist = cur_start - span_col_end_(span);
+                bias     = (size_t)0 - span_col_end_(span);
+            } else if (span->row < cur_span->row) {
+                row_dist = cur_span->row - span->row;
+                col_dist = (size_t)0 - span_col_end_(span);
+                bias     = (size_t)0 - span_col_start_(span);
+            } else {
+                continue;
+            }
+        } else if (dx > 0) {
+            if (span->row == cur_span->row) {
+                if (span_col_start_(span) < cur_end)
+                    continue;
+                row_dist = 0;
+                col_dist = span_col_start_(span) - cur_end;
+                bias     = span_col_start_(span);
+            } else if (span->row > cur_span->row) {
+                row_dist = span->row - cur_span->row;
+                col_dist = span_col_start_(span);
+                bias     = span_col_start_(span);
+            } else {
+                continue;
+            }
+        } else if (dy < 0) {
+            if (span->row >= cur_span->row)
+                continue;
+            row_dist = cur_span->row - span->row;
+            col_dist = column_distance_(cur_center, span);
+            bias     = (size_t)-span->row;
+        } else if (dy > 0) {
+            if (span->row <= cur_span->row)
+                continue;
+            row_dist = span->row - cur_span->row;
+            col_dist = column_distance_(cur_center, span);
+            bias     = span->row;
+        } else {
+            return false;
+        }
+
+        if (!found || row_dist < best_row ||
+            (row_dist == best_row && col_dist < best_col) ||
+            (row_dist == best_row && col_dist == best_col &&
+             bias < best_bias)) {
+            found     = true;
+            best      = idx;
+            best_row  = row_dist;
+            best_col  = col_dist;
+            best_bias = bias;
+        }
+    }
+
+    if (!found)
+        return false;
+    *target = best;
+    return true;
+}
+
+static bool
+move_link_spatial_(struct nav_state *state, int dx, int dy,
+                   struct nav_action_list *actions)
+{
+    size_t target = 0;
+    if (spatial_target_(state, dx, dy, &target))
+        return select_link_at_(state, target, actions);
+    return false;
+}
+
+static bool
+select_link_at_(struct nav_state *state, size_t target,
+                struct nav_action_list *actions)
+{
+    if (!state || !actions || state->cur.count == 0)
+        return false;
+
+    size_t count        = state->cur.count;
+    size_t target_start = find_block_start_(state, target % count);
+
+    if (state->has_active_link) {
+        size_t current_start =
+            find_block_start_(state, state->prev.index % count);
+        size_t current_end = current_block_end_(state, current_start);
+        size_t idx         = current_start;
+        while (true) {
+            const struct link_span *span = links_get(&state->cur, idx);
+            char *line                   = render_plain_line_(state, span);
+            if (line && span)
+                append_replace_line_action_(actions, span->row, line, false);
+            if (idx == current_end)
+                break;
+            idx = step_index_(idx, count, +1);
+        }
+    }
+
+    state->prev.index = target_start;
+    size_t block_end  = collect_block_(state, target_start, actions);
+    state->cur.index  = block_end;
+    return true;
+}
+
+static size_t
+current_block_end_(struct nav_state *state, size_t start)
+{
+    if (!state || state->cur.count == 0)
+        return start;
+
+    size_t count                  = state->cur.count;
+    const struct link_span *first = links_get(&state->cur, start % count);
+    if (!first)
+        return start % count;
+
+    size_t current = start % count;
+    while (true) {
+        size_t next = step_index_(current, count, +1);
+        if (next == start % count)
+            return current;
+        const struct link_span *span = links_get(&state->cur, next);
+        if (!span || !urls_equal_(first->link, span->link))
+            return current;
+        current = next;
+    }
+}
+
+static bool
+index_in_block_(size_t idx, size_t start, size_t end, size_t count)
+{
+    if (count == 0)
+        return false;
+    idx %= count;
+    start %= count;
+    end %= count;
+    if (start <= end)
+        return idx >= start && idx <= end;
+    return idx >= start || idx <= end;
 }
 
 static size_t
@@ -555,6 +831,180 @@ urls_equal_(const char *a, const char *b)
     return strcmp(a, b) == 0;
 }
 
+static size_t
+skip_escape_(const char *data, size_t len, size_t idx)
+{
+    if (!data || idx >= len || data[idx] != '\033')
+        return idx + 1;
+    idx++;
+    if (idx >= len)
+        return idx;
+
+    unsigned char next = (unsigned char)data[idx];
+    size_t seq_end     = idx + 1;
+    if (next == '[') {
+        while (seq_end < len) {
+            unsigned char term = (unsigned char)data[seq_end++];
+            if (term >= '@' && term <= '~')
+                break;
+        }
+    } else if (next == ']') {
+        while (seq_end < len) {
+            unsigned char cur = (unsigned char)data[seq_end++];
+            if (cur == '\a')
+                break;
+            if (cur == '\033' && seq_end < len &&
+                (unsigned char)data[seq_end] == '\\') {
+                seq_end++;
+                break;
+            }
+        }
+    }
+    if (seq_end > len)
+        seq_end = len;
+    return seq_end;
+}
+
+static void
+advance_printable_cell_(size_t width, size_t *visual_row, size_t *col)
+{
+    if (!visual_row || !col)
+        return;
+    if (width > 0 && *col == width) {
+        (*visual_row)++;
+        *col = 0;
+    }
+    (*col)++;
+}
+
+static size_t
+utf8_advance_(const char *data, size_t len, size_t idx)
+{
+    if (!data || idx >= len)
+        return idx + 1;
+    unsigned char ch = (unsigned char)data[idx];
+    if (ch < 0x80)
+        return idx + 1;
+
+    size_t need = 1;
+    if ((ch & 0xe0) == 0xc0)
+        need = 2;
+    else if ((ch & 0xf0) == 0xe0)
+        need = 3;
+    else if ((ch & 0xf8) == 0xf0)
+        need = 4;
+
+    if (idx + need > len)
+        return idx + 1;
+    for (size_t pos = idx + 1; pos < idx + need; ++pos) {
+        if (((unsigned char)data[pos] & 0xc0) != 0x80)
+            return idx + 1;
+    }
+    return idx + need;
+}
+
+static size_t
+nav_visual_row_for_logical_(const struct offscr_view *view, size_t width,
+                            size_t target_row)
+{
+    if (!view || !view->data || target_row == 0)
+        return 0;
+
+    size_t logical_row = 0;
+    size_t visual_row  = 0;
+    size_t col         = 0;
+    size_t idx         = 0;
+
+    while (idx < view->len) {
+        unsigned char ch = (unsigned char)view->data[idx];
+        if (ch == '\n') {
+            logical_row++;
+            visual_row++;
+            col = 0;
+            idx++;
+            if (logical_row == target_row)
+                return visual_row;
+            continue;
+        }
+        if (ch == '\r') {
+            col = 0;
+            idx++;
+            continue;
+        }
+        if (ch == '\b') {
+            if (col > 0)
+                col--;
+            idx++;
+            continue;
+        }
+        if (ch == '\033') {
+            idx = skip_escape_(view->data, view->len, idx);
+            continue;
+        }
+        advance_printable_cell_(width, &visual_row, &col);
+        idx = utf8_advance_(view->data, view->len, idx);
+    }
+
+    return visual_row;
+}
+
+static size_t
+nav_status_row_(const struct offscr_view *view, size_t width)
+{
+    if (!view || !view->data)
+        return 0;
+
+    size_t visual_row = 0;
+    size_t col        = 0;
+    size_t idx        = 0;
+
+    while (idx < view->len) {
+        unsigned char ch = (unsigned char)view->data[idx];
+        if (ch == '\n') {
+            visual_row++;
+            col = 0;
+            idx++;
+            continue;
+        }
+        if (ch == '\r') {
+            col = 0;
+            idx++;
+            continue;
+        }
+        if (ch == '\b') {
+            if (col > 0)
+                col--;
+            idx++;
+            continue;
+        }
+        if (ch == '\033') {
+            idx = skip_escape_(view->data, view->len, idx);
+            continue;
+        }
+        advance_printable_cell_(width, &visual_row, &col);
+        idx = utf8_advance_(view->data, view->len, idx);
+    }
+
+    return visual_row;
+}
+
+static size_t
+nav_visual_rows_for_logical_(const struct nav_state *state, size_t row)
+{
+    if (!state || !state->view)
+        return 1;
+
+    size_t start =
+        nav_visual_row_for_logical_(state->view, state->screen_cols, row);
+    size_t end = row < state->last_logical_row ?
+                     nav_visual_row_for_logical_(state->view,
+                                                 state->screen_cols, row + 1) :
+                     state->baseline_row + 1;
+    if (end <= start)
+        return 1;
+    return end - start;
+}
+
 static char *
 render_line_for_span_(const struct nav_state *state,
                       const struct link_span *span)
@@ -617,7 +1067,7 @@ append_replace_line_action_(struct nav_action_list *actions, size_t row,
 
 static void
 append_uri_action_(struct nav_action_list *actions, enum nav_action_type type,
-                   const char *uri)
+                   const char *uri, size_t line)
 {
     if (!actions || !uri)
         return;
@@ -630,6 +1080,7 @@ append_uri_action_(struct nav_action_list *actions, enum nav_action_type type,
         free(action);
         return;
     }
+    action->line = line;
     if (!actions->head)
         actions->head = action;
     else
@@ -647,8 +1098,18 @@ apply_actions_(struct nav_state *state, const struct nav_action *actions)
         if (action->type != NAV_ACTION_REPLACE_LINE || !action->content)
             continue;
         char seq[64];
-        int len =
-            snprintf(seq, sizeof(seq), "\x1b[%zu;1H\x1b[2K", action->row + 1);
+        size_t screen_row = nav_visual_row_for_logical_(
+            state->view, state->screen_cols, action->row);
+        size_t rows = nav_visual_rows_for_logical_(state, action->row);
+        for (size_t row = 0; row < rows; ++row) {
+            int len = snprintf(seq, sizeof(seq), "\x1b[%zu;1H\x1b[2K",
+                               screen_row + row + 1);
+            if (len > 0) {
+                if (write(state->out_fd, seq, (size_t)len) == -1)
+                    log_debug("nav: write clear seq failed");
+            }
+        }
+        int len = snprintf(seq, sizeof(seq), "\x1b[%zu;1H", screen_row + 1);
         if (len > 0) {
             if (write(state->out_fd, seq, (size_t)len) == -1)
                 log_debug("nav: write seq failed");
@@ -681,7 +1142,7 @@ execute_uri_actions_(struct nav_state *state, const struct nav_action *actions)
             did_external = true;
         } else if (action->type == NAV_ACTION_EDIT_URI) {
             nav_show_status_message_(state, "Opening editor...");
-            edit_with_editor_(action->uri);
+            edit_with_editor_(action->uri, action->line);
             did_external = true;
         }
     }
@@ -714,7 +1175,7 @@ open_uri_with_mess_(const struct nav_state *state, const char *uri)
 }
 
 static void
-edit_with_editor_(const char *fallback_path)
+edit_with_editor_(const char *fallback_path, size_t line)
 {
     const char *target = getenv("MESSFILE");
     if (!target || target[0] == '\0')
@@ -732,15 +1193,30 @@ edit_with_editor_(const char *fallback_path)
     if (wordexp(cmd, &we, WRDE_NOCMD) != 0)
         return;
 
-    char **argv = calloc(we.we_wordc + 2, sizeof(char *));
+    char line_arg[64];
+    bool have_line = line > 0;
+    if (have_line)
+        snprintf(line_arg, sizeof(line_arg), "+%zu", line);
+
+    char **argv = calloc(we.we_wordc + (have_line ? 3 : 2), sizeof(char *));
     if (!argv) {
         wordfree(&we);
         return;
     }
     for (size_t i = 0; i < we.we_wordc; ++i)
         argv[i] = we.we_wordv[i];
-    argv[we.we_wordc]     = (char *)target;
-    argv[we.we_wordc + 1] = NULL;
+    if (have_line && editor_expects_position_after_file_(we.we_wordv[0])) {
+        argv[we.we_wordc]     = (char *)target;
+        argv[we.we_wordc + 1] = line_arg;
+        argv[we.we_wordc + 2] = NULL;
+    } else if (have_line) {
+        argv[we.we_wordc]     = line_arg;
+        argv[we.we_wordc + 1] = (char *)target;
+        argv[we.we_wordc + 2] = NULL;
+    } else {
+        argv[we.we_wordc]     = (char *)target;
+        argv[we.we_wordc + 1] = NULL;
+    }
 
     pid_t pid = fork();
     if (pid == -1) {
@@ -758,6 +1234,16 @@ edit_with_editor_(const char *fallback_path)
     wordfree(&we);
     if (waitpid(pid, NULL, 0) == -1)
         log_debug("nav: waitpid failed for editor child");
+}
+
+static bool
+editor_expects_position_after_file_(const char *cmd)
+{
+    if (!cmd || !*cmd)
+        return false;
+    const char *base = strrchr(cmd, '/');
+    base             = base ? base + 1 : cmd;
+    return strcmp(base, "kak") == 0;
 }
 
 static void
@@ -826,7 +1312,7 @@ nav_draw_status_bar_(struct nav_state *state)
     const char *selected_link = nav_selected_link_(state);
     if (selected_link && copy_len < width) {
         static const char prefix[] = "=> ";
-        size_t pos = copy_len;
+        size_t pos                 = copy_len;
         for (size_t i = 0; i < sizeof(prefix) - 1 && pos < width; ++i)
             bar[pos++] = prefix[i];
         if (pos < width) {
@@ -862,6 +1348,23 @@ nav_status_clear_(struct nav_state *state)
     if (!state || !state->status_visible)
         return;
 
+    nav_restore_active_selection_(state);
+
+    if (state->baseline_row != state->last_logical_row && state->view &&
+        state->view->data) {
+        static const char clear_seq[] = "\x1b[2J\x1b[H";
+        (void)write(state->out_fd, clear_seq, sizeof(clear_seq) - 1);
+        if (state->view->len > 0)
+            (void)write(state->out_fd, state->view->data, state->view->len);
+        char move[32];
+        int move_len = snprintf(move, sizeof(move), "\x1b[%zu;1H",
+                                state->baseline_row + 1);
+        if (move_len > 0)
+            (void)write(state->out_fd, move, (size_t)move_len);
+        state->status_visible = false;
+        return;
+    }
+
     char seq[64];
     size_t row = state->baseline_row + 1;
     int len    = snprintf(seq, sizeof(seq), "\x1b[%zu;1H\x1b[2K", row);
@@ -870,7 +1373,7 @@ nav_status_clear_(struct nav_state *state)
 
     char *last_row = NULL;
     if (state->view)
-        last_row = offscr_extract(state->view, state->baseline_row);
+        last_row = offscr_extract(state->view, state->last_logical_row);
     if (last_row) {
         size_t text_len = strlen(last_row);
         if (text_len > 0)
@@ -879,6 +1382,33 @@ nav_status_clear_(struct nav_state *state)
     }
     (void)write(state->out_fd, "\r", 1);
     state->status_visible = false;
+}
+
+static void
+nav_restore_active_selection_(struct nav_state *state)
+{
+    if (!state || !state->has_active_link || state->cur.count == 0)
+        return;
+
+    struct nav_action_list actions = {0};
+    size_t count                   = state->cur.count;
+    size_t current_start = find_block_start_(state, state->prev.index % count);
+    size_t current_end   = current_block_end_(state, current_start);
+    size_t idx           = current_start;
+
+    while (true) {
+        const struct link_span *span = links_get(&state->cur, idx);
+        char *line                   = render_plain_line_(state, span);
+        if (line && span)
+            append_replace_line_action_(&actions, span->row, line, false);
+        if (idx == current_end)
+            break;
+        idx = step_index_(idx, count, +1);
+    }
+
+    apply_actions_(state, actions.head);
+    nav_free_actions(actions.head);
+    state->has_active_link = false;
 }
 
 static void
