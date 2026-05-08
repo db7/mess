@@ -1,4 +1,4 @@
-// RUN: env MESSPAGER=%x %mess %S/data/sample0.md | %check
+// RUN: env MESS_PAGER=%x %mess %S/data/sample0.md | %check
 // CHECK: ARGS: %x
 // CHECK: MESSFILE={{.*}}/data/sample0.md
 // CHECK: FIRST:{{ *}}sample

@@ -71,7 +71,7 @@ Set
 system wide when you want the wrapper to stand in for
 .BR less (1);
 export
-.B MESSPAGER="less -R"
+.B MESS_PAGER="less -R"
 to point downstream at your preferred pager so recursive invocations keep
 working.
 .SH REQUIREMENTS
@@ -97,7 +97,7 @@ for inline browsing, and a graphical opener such as
 or
 .BR xdg-open (1).
 The dispatcher honors the
-.B MESSPAGER
+.B MESS_PAGER
 ,
 .B BROWSER
 , and
@@ -186,7 +186,7 @@ Any other key exits navigation mode and is forwarded to the pager unchanged.
 The selection persists until cleared explicitly or a new buffer is viewed.
 .SH ENVIRONMENT
 .TP
-.B MESSPAGER
+.B MESS_PAGER
 Overrides the downstream pager command. The default is `less -R`.
 .TP
 .B BROWSER

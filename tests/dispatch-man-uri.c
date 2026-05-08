@@ -1,4 +1,4 @@
-// RUN: env PATH=%S/support:$PATH MESSPAGER=%(realpath %x) %mess man://printf.3 | %check
+// RUN: env PATH=%S/support:$PATH MESS_PAGER=%(realpath %x) %mess man://printf.3 | %check
 // CHECK: ARGS: {{.*}}/dispatch-man-uri.bin
 // CHECK: MESSFILE=(null)
 // CHECK: FIRST:PRINTF(3)

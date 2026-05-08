@@ -51,7 +51,7 @@ touches stdin and instead decides which helper to spawn:
 - Markdown files run through the configured renderer (`MESS_MDRENDER`,
   defaulting to `mdcat` with a fallback to `lowdown`) and the renderer’s
   output is piped into `mess -m -o`, so link navigation stays active while the
-  wrapper still honors `MESSPAGER`/`PAGER` for its downstream pager.
+  wrapper still honors `MESS_PAGER` for its downstream pager.
 - Regular files are opened on stdin through the same wrapper path. Everything
   else forwards to the platform browser (`open`/`xdg-open`).
 

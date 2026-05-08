@@ -355,7 +355,7 @@ enter_nav_(int child_fd, struct readq *tty_q)
 static void
 exec_subpager_(void)
 {
-    const char *cmd = getenv("MESSPAGER");
+    const char *cmd = getenv("MESS_PAGER");
     if (cmd == NULL || cmd[0] == '\0')
         cmd = "less -R";
 

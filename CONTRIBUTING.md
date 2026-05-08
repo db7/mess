@@ -40,7 +40,7 @@ guidelines below when proposing changes.
 - Existing code prefers small helper functions over deeply nested logic; follow
   that pattern and keep functions focused.
 - Use the provided `make format` target before sending larger formatting
-  changes.
+  changes. The project uses an `astyle`-based formatting style.
 
 ## Licensing
 
