@@ -71,7 +71,7 @@ test_man_uri_detection(void)
     assert(!uri_parse_man_uri("man://invalid", &topic));
 }
 
-// Check that file:// URIs map to canonicalised real paths.
+// Check that file:// URIs map to canonicalized real paths.
 static void
 test_file_uri_conversion(void)
 {

@@ -1,0 +1,9 @@
+#!/bin/sh
+
+set -eu
+
+dir=${0%/*}
+mess=$1
+pager=$2
+
+PATH=$dir:$PATH MESS_PAGER=$pager exec "$mess" man://printf.3

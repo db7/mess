@@ -35,6 +35,8 @@ static void set_manpager_(void);
 static char *quote_sh_(const char *text);
 static void set_uri_env_(const char *uri);
 static bool find_self_(const char *name);
+static int split_path_(const char *path, char *dir, size_t dir_sz,
+                       const char **base);
 
 static char self_path_[PATH_MAX];
 static bool have_self_path_;
@@ -233,6 +235,11 @@ build_cmd_(const char *env, const char *fallback, wordexp_t *we)
 static int
 run_md_(const char *path)
 {
+    char dir[PATH_MAX];
+    const char *base = NULL;
+    if (split_path_(path, dir, sizeof(dir), &base) != 0)
+        return -1;
+
     const char *renderer_env = getenv("MESS_MDRENDER");
     wordexp_t render_we;
     if (build_cmd_(renderer_env, md_(), &render_we) != 0)
@@ -244,7 +251,7 @@ run_md_(const char *path)
     }
     for (size_t i = 0; i < render_we.we_wordc; ++i)
         renderer_argv[i] = render_we.we_wordv[i];
-    renderer_argv[render_we.we_wordc]     = (char *)path;
+    renderer_argv[render_we.we_wordc]     = (char *)base;
     renderer_argv[render_we.we_wordc + 1] = NULL;
 
     int pipefd[2];
@@ -265,11 +272,15 @@ run_md_(const char *path)
         return -1;
     }
     if (renderer == 0) {
+        if (chdir(dir) == -1) {
+            perror(dir);
+            _exit(127);
+        }
         dup2(pipefd[1], STDOUT_FILENO);
         close(pipefd[0]);
         close(pipefd[1]);
         execvp(renderer_argv[0], renderer_argv);
-        execlp("cat", "cat", path, (char *)NULL);
+        execlp("cat", "cat", base, (char *)NULL);
         perror("markdown renderer");
         _exit(127);
     }
@@ -285,6 +296,10 @@ run_md_(const char *path)
         return -1;
     }
     if (pager == 0) {
+        if (chdir(dir) == -1) {
+            perror(dir);
+            _exit(127);
+        }
         dup2(pipefd[0], STDIN_FILENO);
         close(pipefd[0]);
         close(pipefd[1]);
@@ -301,6 +316,39 @@ run_md_(const char *path)
     int rc1 = wait_child_(renderer);
     int rc2 = wait_child_(pager);
     return (rc1 == 0) ? rc2 : rc1;
+}
+
+static int
+split_path_(const char *path, char *dir, size_t dir_sz, const char **base)
+{
+    if (!path || !*path || !dir || dir_sz == 0 || !base) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    const char *slash = strrchr(path, '/');
+    if (!slash) {
+        if (snprintf(dir, dir_sz, ".") >= (int)dir_sz) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        *base = path;
+        return 0;
+    }
+
+    size_t len = (slash == path) ? 1 : (size_t)(slash - path);
+    if (len >= dir_sz) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(dir, path, len);
+    dir[len] = '\0';
+    *base    = slash + 1;
+    if (**base == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
 }
 
 static int

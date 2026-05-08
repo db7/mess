@@ -1,9 +1,9 @@
 // clang-format off
-// RUN: env MESS_PAGER=%(realpath %x) %mess %S/data/sample0.md | %check
-// CHECK: ARGS: {{.*}}/dispatch-pager-file.bin
-// CHECK: MESSFILE={{.*}}/data/sample0.md
-// CHECK: CWD:{{.*}}/data
-// CHECK: FIRST:{{ *}}sample
+// RUN: env MESS_PAGER=%(realpath %x) MESS_MDRENDER=cat %mess %S/data/nested/page.md | %check
+// CHECK: ARGS: {{.*}}/dispatch-pager-relative.bin
+// CHECK: MESSFILE={{.*}}/data/nested/page.md
+// CHECK: CWD:{{.*}}/data/nested
+// CHECK: FIRST:{{ *}}nested page
 // clang-format on
 
 #include <stdio.h>
