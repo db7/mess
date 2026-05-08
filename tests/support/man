@@ -1,0 +1,16 @@
+#!/bin/sh
+
+emit_page()
+{
+	if [ "$#" -eq 2 ]; then
+		printf '%s(%s)\n' "$2" "$1" | tr '[:lower:]' '[:upper:]'
+	else
+		printf '%s\n' "$*"
+	fi
+}
+
+if [ -n "$MANPAGER" ]; then
+	emit_page "$@" | eval "$MANPAGER"
+else
+	emit_page "$@"
+fi
