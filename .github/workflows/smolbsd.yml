@@ -15,20 +15,27 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Copy smolBSD helpers
-        run: cp -r scripts /data
+      - name: Tar project
+        run: tar cf project.tar .
 
-      - name: Inject workspace into image
+      - name: Fetch tikl archive
         run: |
-          cd /data
-          scripts/smolbsd/add2img.sh smolBSD/smolbsd.img "$GITHUB_WORKSPACE"
+          mkdir -p deps
+          curl -L --fail --silent --show-error \
+            -o deps/tikl-0.4.2.tar.gz \
+            https://github.com/db7/tikl/archive/refs/tags/v0.4.2.tar.gz
+
+      - name: Create payload image
+        run: .github/smol/scripts/pack-payload.sh payload.img .github/smol/run.sh project.tar deps/tikl-0.4.2.tar.gz
 
       - name: Boot smolBSD and run tests
-        run: |
-          cd /data/smolBSD
-          ./startnb.sh -k netbsd-SMOL -i smolbsd.img -m 2048 -x "-no-reboot"
+        run: .github/smol/scripts/run-payload.sh /smolBSD cicd payload.img
 
       - name: Collect results
-        run: |
-          cd /data
-          scripts/smolbsd/get_results.sh smolBSD/smolbsd.img
+        run: .github/smol/scripts/unpack-payload.sh payload.img results
+
+      - name: List results
+        run: ls results
+
+      - name: Ensure tests passed
+        run: .github/smol/check-results.sh results

@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/select.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <wordexp.h>
