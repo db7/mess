@@ -22,8 +22,8 @@ SRCS=		main.c dispatcher.c pager.c \
 OBJS=		${SRCS:S/.c/.o/}
 OBJS=		${SRCS:.c=.o}
 
-SRCS.test=	$(shell find tests -name '*.c' -depth 1)
-SRCS.test!=	find tests -name '*.c' -depth 1
+SRCS.test=	$(shell find tests -maxdepth 1 -name '*.c')
+SRCS.test!=	find tests -maxdepth 1 -name '*.c'
 TGTS.test=	${SRCS.test:S/.c/.bin/}
 TGTS.test=	${SRCS.test:.c=.bin}
 
@@ -64,6 +64,8 @@ version.h: version.h.in
 
 mess.1: mess.1.in
 	scripts/versionize.sh -r mess.1.in > $@
+
+main.o: version.h
 
 mess: ${OBJS}
 	${CC} ${CFLAGS} ${CPPFLAGS} -o $@ ${OBJS} ${LDFLAGS} ${LDLIBS}
