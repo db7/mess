@@ -1,31 +1,36 @@
 .POSIX:
 
-CC=		cc
-CFLAGS=		-O0 -g3 -Wall -Wextra -Werror
-CFLAGS.objs=	-std=c11 -MMD -MP
-CPPFLAGS=	-I.
+CC=			cc
+CFLAGS=			-O0 -g3 -Wall -Wextra -Werror
+CFLAGS.objs=		-std=c11 -MMD -MP
+UNAME=			$(shell uname)
+UNAME!=			uname
+CPPFLAGS=		-D_XOPEN_SOURCE=700 -I.
+CPPFLAGS.Linux=		-D_GNU_SOURCE
+CPPFLAGS.Darwin=	-D_DARWIN_C_SOURCE
+CPPFLAGS+=		${CPPFLAGS.${UNAME}}
 LDFLAGS=
 LDLIBS=
 
-CFLAGS.cov=	${CFLAGS} --coverage
-LDFLAGS.cov=	${LDFLAGS} --coverage
+CFLAGS.cov=		${CFLAGS} --coverage
+LDFLAGS.cov=		${LDFLAGS} --coverage
 
-PREFIX=		/usr/local
-BINDIR=		${PREFIX}/bin
-MANDIR=		${PREFIX}/share/man
-INSTALL=	install
+PREFIX=			/usr/local
+BINDIR=			${PREFIX}/bin
+MANDIR=			${PREFIX}/share/man
+INSTALL=		install
 
-SRCS=		main.c dispatcher.c pager.c \
-		nav.c offscr.c readq.c \
-		uri.c links.c styler.c ansi.c \
-		strbuf.c log.c
-OBJS=		${SRCS:S/.c/.o/}
-OBJS=		${SRCS:.c=.o}
+SRCS=			main.c dispatcher.c pager.c \
+			nav.c offscr.c readq.c \
+			uri.c links.c styler.c ansi.c \
+			strbuf.c log.c
+OBJS=			${SRCS:S/.c/.o/}
+OBJS=			${SRCS:.c=.o}
 
-SRCS.test=	$(shell find tests -maxdepth 1 -name '*.c')
-SRCS.test!=	find tests -maxdepth 1 -name '*.c'
-TGTS.test=	${SRCS.test:S/.c/.bin/}
-TGTS.test=	${SRCS.test:.c=.bin}
+SRCS.test=		$(shell find tests -maxdepth 1 -name '*.c')
+SRCS.test!=		find tests -maxdepth 1 -name '*.c'
+TGTS.test=		${SRCS.test:S/.c/.bin/}
+TGTS.test=		${SRCS.test:.c=.bin}
 
 # ------------------------------------------------------------------------------
 # main targets
