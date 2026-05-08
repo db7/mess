@@ -97,8 +97,6 @@ for inline browsing, and a graphical opener such as
 or
 .BR xdg-open (1).
 The dispatcher honors the
-.B PAGER
-,
 .B MESSPAGER
 ,
 .B BROWSER
@@ -188,17 +186,8 @@ Any other key exits navigation mode and is forwarded to the pager unchanged.
 The selection persists until cleared explicitly or a new buffer is viewed.
 .SH ENVIRONMENT
 .TP
-.B PAGER
-Overrides the downstream pager command.
 .B MESSPAGER
-is consulted before
-.B PAGER
-so you can reserve a separate command for the wrapper; when you export
-.B PAGER=mess
-system-wide, set
-.B MESSPAGER
-to your real pager (for example `less -R`) so the dispatcher knows what to run
-downstream.
+Overrides the downstream pager command. The default is `less -R`.
 .TP
 .B BROWSER
 Command used when opening links or non Markdown targets. The value is

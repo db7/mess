@@ -1,4 +1,4 @@
-// RUN: env PAGER=%x MESSPAGER=%x %mess file://%(realpath %S/data/uri) | %check
+// RUN: env MESSPAGER=%x %mess file://%(realpath %S/data/uri) | %check
 // CHECK: ARGS: %x
 // CHECK: MESSFILE={{.*}}/data/uri
 // CHECK: FIRST:{{ *}}uri

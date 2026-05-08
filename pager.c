@@ -356,13 +356,6 @@ static void
 exec_subpager_(void)
 {
     const char *cmd = getenv("MESSPAGER");
-    if (cmd == NULL || cmd[0] == '\0') {
-        const char *pager_env = getenv("PAGER");
-        if (pager_env && pager_env[0] &&
-            !dispatcher_command_is_self(pager_env)) {
-            cmd = pager_env;
-        }
-    }
     if (cmd == NULL || cmd[0] == '\0')
         cmd = "less -R";
 
