@@ -9,6 +9,23 @@
 #include <string.h>
 #include <unistd.h>
 
+static int
+mkstemp_with_suffix_(char *path, size_t path_len, const char *prefix,
+                     const char *suffix)
+{
+    char template[PATH_MAX];
+    int len = snprintf(template, sizeof(template), "%sXXXXXX", prefix);
+    assert(len > 0 && (size_t)len < sizeof(template));
+
+    int fd = mkstemp(template);
+    assert(fd >= 0);
+
+    len = snprintf(path, path_len, "%s%s", template, suffix);
+    assert(len > 0 && (size_t)len < path_len);
+    assert(rename(template, path) == 0);
+    return fd;
+}
+
 // Validate markdown extension detection across case variants.
 static void
 test_markdown_detection(void)
@@ -95,16 +112,18 @@ test_uri_parse(void)
     assert(strcmp(info.man.name, "printf") == 0);
     assert(strcmp(info.man.section, "3") == 0);
 
-    char md_template[] = "uri-md-XXXXXX.md";
-    int md_fd          = mkstemps(md_template, 3);
+    char md_template[PATH_MAX];
+    int md_fd = mkstemp_with_suffix_(md_template, sizeof(md_template),
+                                     "uri-md-", ".md");
     assert(md_fd >= 0);
     close(md_fd);
     assert(uri_parse(md_template, &info));
     assert(info.type == URI_KIND_MARKDOWN_FILE);
     unlink(md_template);
 
-    char man_template[] = "uri-man-XXXXXX.1";
-    int man_fd          = mkstemps(man_template, 2);
+    char man_template[PATH_MAX];
+    int man_fd = mkstemp_with_suffix_(man_template, sizeof(man_template),
+                                      "uri-man-", ".1");
     assert(man_fd >= 0);
     close(man_fd);
     assert(uri_parse(man_template, &info));

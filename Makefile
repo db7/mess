@@ -11,6 +11,8 @@ CPPFLAGS.Darwin=	-D_DARWIN_C_SOURCE
 CPPFLAGS+=		${CPPFLAGS.${UNAME}}
 LDFLAGS=
 LDLIBS=
+LDLIBS.NetBSD=		-lutil
+LDLIBS+=		${LDLIBS.${UNAME}}
 
 CFLAGS.cov=		${CFLAGS} --coverage
 LDFLAGS.cov=		${LDFLAGS} --coverage
