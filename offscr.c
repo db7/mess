@@ -18,7 +18,7 @@ struct offscr_ctx {
     struct strbuf buf;
 };
 
-static const size_t default_soft_limit_ = 64 * 1024;
+static const size_t default_soft_limit_             = 64 * 1024;
 static const unsigned int default_first_timeout_ms_ = 1000;
 static const unsigned int default_next_timeout_ms_  = 250;
 
@@ -97,12 +97,10 @@ offscr_capture(struct offscr_ctx *ctx, int fd)
         .fd     = fd,
         .events = POLLIN | POLLHUP | POLLERR,
     };
-    const int first_timeout =
-        poll_timeout_value_(ctx->first_byte_timeout_ms);
-    const int next_timeout =
-        poll_timeout_value_(ctx->next_byte_timeout_ms);
-    const bool draining = ctx->drain;
-    int timeout         = first_timeout;
+    const int first_timeout = poll_timeout_value_(ctx->first_byte_timeout_ms);
+    const int next_timeout  = poll_timeout_value_(ctx->next_byte_timeout_ms);
+    const bool draining     = ctx->drain;
+    int timeout             = first_timeout;
 
     int saw_data = 0;
     char chunk[4096];
@@ -140,8 +138,8 @@ offscr_capture(struct offscr_ctx *ctx, int fd)
 
         if (!saw_data) {
             strbuf_reset(&ctx->buf);
-            saw_data       = 1;
-            timeout        = next_timeout;
+            saw_data = 1;
+            timeout  = next_timeout;
         }
 
         size_t copy_len = allowed_copy_size_(ctx, (size_t)nread);
@@ -164,8 +162,8 @@ offscr_view(const struct offscr_ctx *ctx)
     struct offscr_view view = {0};
     if (ctx == NULL)
         return view;
-    view.data      = strbuf_data(&ctx->buf);
-    view.len       = strbuf_len(&ctx->buf);
+    view.data = strbuf_data(&ctx->buf);
+    view.len  = strbuf_len(&ctx->buf);
     return view;
 }
 
@@ -214,7 +212,7 @@ offscr_extract(const struct offscr_view *view, size_t target_row)
             continue;
         }
         if (ch == '\033') {
-            size_t seq_start = idx;
+            size_t seq_start    = idx;
             struct ansi_seq seq = ansi_parse_seq(view->data, view->len, idx);
             if (row == target_row) {
                 if (ansi_seq_is_cursor_movement(&seq)) {

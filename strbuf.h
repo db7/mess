@@ -9,10 +9,7 @@ struct strbuf {
     size_t cap;
 };
 
-#define STRBUF_INIT                                                            \
-    {                                                                          \
-        NULL, 0, 0                                                             \
-    }
+#define STRBUF_INIT {NULL, 0, 0}
 
 void strbuf_init(struct strbuf *, size_t initial_cap);
 void strbuf_reset(struct strbuf *);

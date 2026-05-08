@@ -13,8 +13,8 @@ test_link_offsets(void)
     const char sample[] =
         "\x1b]8;;https://example.com\x1b\\Link\x1b]8;;\x1b\\\n";
     struct offscr_view view = {
-        .data      = sample,
-        .len       = strlen(sample),
+        .data = sample,
+        .len  = strlen(sample),
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -37,8 +37,8 @@ static void
 test_parse_simple_snapshot(void)
 {
     struct offscr_view view = {
-        .data      = OSC8_SAMPLE_TWO_LINKS_,
-        .len       = strlen(OSC8_SAMPLE_TWO_LINKS_),
+        .data = OSC8_SAMPLE_TWO_LINKS_,
+        .len  = strlen(OSC8_SAMPLE_TWO_LINKS_),
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -59,8 +59,8 @@ test_parse_positions(void)
         "\x1b]8;;https://pos.example\x1b\\First\x1b]8;;\x1b\\\n"
         "Next line\x1b]8;;https://next.example\x1b\\Second\x1b]8;;\x1b\\";
     struct offscr_view view = {
-        .data      = sample,
-        .len       = strlen(sample),
+        .data = sample,
+        .len  = strlen(sample),
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -86,8 +86,8 @@ test_iter_match_and_next(void)
         "\x1b]8;;https://dup.example\x1b\\B\x1b]8;;\x1b\\ "
         "\x1b]8;;https://other.example\x1b\\C\x1b]8;;\x1b\\";
     struct offscr_view view = {
-        .data      = sample,
-        .len       = strlen(sample),
+        .data = sample,
+        .len  = strlen(sample),
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -125,8 +125,8 @@ test_empty_osc8_close_is_ignored(void)
         "    \x1b]8;;https://example.com/debouncer\x1b\\"
         "https://example.com/debouncer\x1b]8;;\x1b\\";
     struct offscr_view view = {
-        .data      = sample,
-        .len       = strlen(sample),
+        .data = sample,
+        .len  = strlen(sample),
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -145,8 +145,8 @@ test_parse_multiple_modes(void)
         "\x1b]8;;https://example.com\x1b\\Link\x1b]8;;\x1b\\\n"
         "printf(3) call\n";
     struct offscr_view view = {
-        .data      = sample,
-        .len       = strlen(sample),
+        .data = sample,
+        .len  = strlen(sample),
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -163,8 +163,8 @@ test_mixed_link_order(void)
         "printf(3) only\n"
         "\x1b]8;;https://example.com\x1b\\Later\x1b]8;;\x1b\\\n";
     struct offscr_view view = {
-        .data      = sample,
-        .len       = strlen(sample),
+        .data = sample,
+        .len  = strlen(sample),
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_OSC8, &iter) == 0);
@@ -184,8 +184,8 @@ test_colored_man_token(void)
 {
     const char sample[]     = "\x1b[1;94mwordexp(3)\x1b[0m and others";
     struct offscr_view view = {
-        .data      = sample,
-        .len       = strlen(sample),
+        .data = sample,
+        .len  = strlen(sample),
     };
     struct link_iter iter = {0};
     assert(parse_links(&view, LINKS_KIND_MAN, &iter) == 0);

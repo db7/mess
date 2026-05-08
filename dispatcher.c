@@ -306,8 +306,8 @@ run_md_(const char *path)
 static int
 run_file_(const char *path)
 {
-    int rc            = 0;
-    int fd            = open(path, O_RDONLY);
+    int rc = 0;
+    int fd = open(path, O_RDONLY);
     if (fd == -1) {
         perror(path);
         rc = -1;

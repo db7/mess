@@ -122,7 +122,7 @@ pager_run(int parse_flags)
 #endif
 
     pager_child_pid_ = pid;
-    rc = parent_run_(pid, master_fd, tty_fd, parse_flags);
+    rc               = parent_run_(pid, master_fd, tty_fd, parse_flags);
 out:
     pager_child_pid_ = -1;
     if (tty_fd != -1 && raw_mode_set)

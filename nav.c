@@ -67,10 +67,9 @@ static size_t highlight_block_(struct nav_state *state, size_t start_idx);
 static void restore_active_block_(struct nav_state *state);
 static bool urls_equal_(const char *a, const char *b);
 static size_t status_row_(const struct offscr_view *view, size_t width);
-static size_t visual_row_(const struct offscr_view *view,
-                                          size_t width, size_t target_row);
-static size_t visual_rows_(const struct nav_state *state,
-                                           size_t row);
+static size_t visual_row_(const struct offscr_view *view, size_t width,
+                          size_t target_row);
+static size_t visual_rows_(const struct nav_state *state, size_t row);
 static char *render_line_for_span_(const struct nav_state *state,
                                    const struct link_span *span);
 static char *render_plain_line_(const struct nav_state *state,
@@ -348,7 +347,8 @@ nav_process_input_(struct nav_state *state, struct readq *rq)
         if (byte == '\n' || byte == '\r') {
             const struct link_span *span = NULL;
             if (state->links.count > 0) {
-                size_t index = state->has_active_link ? state->selected_index : 0;
+                size_t index =
+                    state->has_active_link ? state->selected_index : 0;
                 span = links_get(&state->links, index % state->links.count);
             }
             if (span && span->link) {
@@ -363,7 +363,8 @@ nav_process_input_(struct nav_state *state, struct readq *rq)
         if (byte == 'e' || byte == 'E') {
             const struct link_span *span = NULL;
             if (state->links.count > 0) {
-                size_t index = state->has_active_link ? state->selected_index : 0;
+                size_t index =
+                    state->has_active_link ? state->selected_index : 0;
                 span = links_get(&state->links, index % state->links.count);
             }
             if (span && span->link) {
@@ -750,8 +751,7 @@ utf8_advance_(const char *data, size_t len, size_t idx)
 }
 
 static size_t
-visual_row_(const struct offscr_view *view, size_t width,
-                            size_t target_row)
+visual_row_(const struct offscr_view *view, size_t width, size_t target_row)
 {
     if (!view || !view->data || target_row == 0)
         return 0;
@@ -840,12 +840,10 @@ visual_rows_(const struct nav_state *state, size_t row)
     if (!state || !state->view)
         return 1;
 
-    size_t start =
-        visual_row_(state->view, state->screen_cols, row);
-    size_t end = row < state->last_logical_row ?
-                     visual_row_(state->view,
-                                                 state->screen_cols, row + 1) :
-                     state->baseline_row + 1;
+    size_t start = visual_row_(state->view, state->screen_cols, row);
+    size_t end   = row < state->last_logical_row ?
+                       visual_row_(state->view, state->screen_cols, row + 1) :
+                       state->baseline_row + 1;
     if (end <= start)
         return 1;
     return end - start;
@@ -893,9 +891,8 @@ replace_line_(struct nav_state *state, size_t row, char *content)
         return;
 
     char seq[64];
-    size_t screen_row =
-        visual_row_(state->view, state->screen_cols, row);
-    size_t rows = visual_rows_(state, row);
+    size_t screen_row = visual_row_(state->view, state->screen_cols, row);
+    size_t rows       = visual_rows_(state, row);
     for (size_t visual = 0; visual < rows; ++visual) {
         int len = snprintf(seq, sizeof(seq), "\x1b[%zu;1H\x1b[2K",
                            screen_row + visual + 1);
@@ -908,8 +905,7 @@ replace_line_(struct nav_state *state, size_t row, char *content)
         log_debug("nav: write seq failed");
 
     size_t content_len = strlen(content);
-    if (content_len > 0 &&
-        write(state->out_fd, content, content_len) == -1)
+    if (content_len > 0 && write(state->out_fd, content, content_len) == -1)
         log_debug("nav: write content failed");
 
     free(content);

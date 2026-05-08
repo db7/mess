@@ -419,7 +419,7 @@ static int
 parse_links_osc8(const char *buf, size_t len, struct link_iter *res)
 {
     struct cursor_pos pos = {0};
-    size_t i             = 0;
+    size_t i              = 0;
 
     while (i < len) {
         unsigned char ch = (unsigned char)buf[i];
@@ -434,11 +434,11 @@ parse_links_osc8(const char *buf, size_t len, struct link_iter *res)
                 continue;
             }
 
-            size_t text_start = open.end;
+            size_t text_start          = open.end;
             struct cursor_pos text_pos = pos;
-            size_t scan = text_start;
-            struct osc8_seq close = {0};
-            bool found_close = false;
+            size_t scan                = text_start;
+            struct osc8_seq close      = {0};
+            bool found_close           = false;
             while (scan < len) {
                 unsigned char text_ch = (unsigned char)buf[scan];
                 if (text_ch == '\033' &&
