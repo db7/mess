@@ -62,8 +62,6 @@ static bool move_link_spatial_(struct nav_state *state, int dx, int dy);
 static bool select_link_at_(struct nav_state *state, size_t target);
 static size_t current_block_end_(struct nav_state *state, size_t start);
 static bool index_in_block_(size_t idx, size_t start, size_t end, size_t count);
-static size_t step_index_(size_t idx, size_t count, int direction);
-static size_t find_block_start_(struct nav_state *state, size_t idx);
 static size_t highlight_block_(struct nav_state *state, size_t start_idx);
 static void restore_active_block_(struct nav_state *state);
 static bool urls_equal_(const char *a, const char *b);
@@ -455,7 +453,7 @@ spatial_target_(struct nav_state *state, int dx, int dy, size_t *target)
     if (!cur_span)
         return false;
 
-    size_t block_start = find_block_start_(state, current);
+    size_t block_start = current;
     size_t block_end   = current_block_end_(state, block_start);
     size_t cur_start   = span_col_start_(cur_span);
     size_t cur_end     = span_col_end_(cur_span);
@@ -557,7 +555,7 @@ select_link_at_(struct nav_state *state, size_t target)
         return false;
 
     size_t count        = state->links.count;
-    size_t target_start = find_block_start_(state, target % count);
+    size_t target_start = target % count;
 
     restore_active_block_(state);
 
@@ -579,15 +577,14 @@ current_block_end_(struct nav_state *state, size_t start)
         return start % count;
 
     size_t current = start % count;
-    while (true) {
-        size_t next = step_index_(current, count, +1);
-        if (next == start % count)
-            return current;
+    while (current + 1 < count) {
+        size_t next                  = current + 1;
         const struct link_span *span = links_get(&state->links, next);
         if (!span || !urls_equal_(first->link, span->link))
             return current;
         current = next;
     }
+    return current;
 }
 
 static bool
@@ -604,43 +601,6 @@ index_in_block_(size_t idx, size_t start, size_t end, size_t count)
 }
 
 static size_t
-step_index_(size_t idx, size_t count, int direction)
-{
-    if (count == 0)
-        return 0;
-    if (direction >= 0)
-        return (idx + 1) % count;
-    return (idx == 0) ? (count - 1) : (idx - 1);
-}
-
-static size_t
-find_block_start_(struct nav_state *state, size_t idx)
-{
-    size_t count = state->links.count;
-    if (count == 0)
-        return idx;
-
-    const struct link_span *span = links_get(&state->links, idx % count);
-    if (!span)
-        return idx % count;
-    const char *url = span->link;
-    size_t current  = idx % count;
-
-    while (true) {
-        size_t prev = step_index_(current, count, -1);
-        if (prev == current)
-            break;
-        const struct link_span *prev_span = links_get(&state->links, prev);
-        if (!prev_span || !urls_equal_(url, prev_span->link))
-            break;
-        current = prev;
-        if (current == idx)
-            break;
-    }
-    return current;
-}
-
-static size_t
 highlight_block_(struct nav_state *state, size_t start_idx)
 {
     if (!state)
@@ -652,14 +612,13 @@ highlight_block_(struct nav_state *state, size_t start_idx)
     }
 
     size_t idx       = start_idx % count;
-    size_t processed = 0;
     bool first_entry = true;
     bool highlighted = false;
 
     const struct link_span *first_span = links_get(&state->links, idx);
     const char *url                    = first_span ? first_span->link : NULL;
 
-    while (processed < count) {
+    while (idx < count) {
         const struct link_span *span = links_get(&state->links, idx);
         if (!span)
             break;
@@ -671,11 +630,8 @@ highlight_block_(struct nav_state *state, size_t start_idx)
             replace_line_(state, span->row, line);
 
         highlighted = true;
-        processed++;
         first_entry = false;
-        idx         = step_index_(idx, count, +1);
-        if (idx == start_idx)
-            break;
+        idx++;
     }
 
     state->has_active_link = highlighted;
@@ -689,7 +645,7 @@ restore_active_block_(struct nav_state *state)
         return;
 
     size_t count = state->links.count;
-    size_t idx   = find_block_start_(state, state->selected_index % count);
+    size_t idx   = state->selected_index % count;
     size_t end   = current_block_end_(state, idx);
 
     while (true) {
@@ -699,7 +655,7 @@ restore_active_block_(struct nav_state *state)
             replace_line_(state, span->row, line);
         if (idx == end)
             break;
-        idx = step_index_(idx, count, +1);
+        idx++;
     }
 
     state->has_active_link = false;

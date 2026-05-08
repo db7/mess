@@ -94,6 +94,10 @@ tests/unit-links.bin:	tests/unit-links.o links.o ansi.o strbuf.o
 	${CC} -o $@ tests/unit-links.o links.o ansi.o strbuf.o ${LDFLAGS}
 tests/unit-styler.bin:	tests/unit-styler.o styler.o ansi.o strbuf.o
 	${CC} -o $@ tests/unit-styler.o styler.o ansi.o strbuf.o ${LDFLAGS}
+tests/unit-nav.bin:	tests/unit-nav.o nav.o links.o offscr.o readq.o
+tests/unit-nav.bin:	ansi.o styler.o strbuf.o log.o
+	${CC} -o $@ tests/unit-nav.o nav.o links.o offscr.o readq.o ansi.o \
+			styler.o strbuf.o log.o ${LDFLAGS}
 
 tests/unit-offscr.bin:	tests/unit-offscr.o links.o offscr.o readq.o uri.o
 tests/unit-offscr.bin:	ansi.o strbuf.o log.o
