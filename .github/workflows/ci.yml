@@ -30,6 +30,7 @@ jobs:
       - name: Run tests
         run: |
           export CC=${{ matrix.cc }}
+          make tikl-fetch-build
           make test
 
   alpine:
@@ -47,4 +48,6 @@ jobs:
         run: make
 
       - name: Run tests
-        run: make test
+        run: |
+          make tikl-fetch-build
+          make test

@@ -121,13 +121,13 @@ TIKL_CMD=	$(shell ${TIKL_FIND_})
 TIKL_CMD!=	${TIKL_FIND_}
 
 
-tikl-local-install:
+tikl-fetch-build:
 	@${TIKL_INSTALL_}
 
 tikl-check:
 	@if [ -z "${TIKL_CMD}" ]; then \
 		printf '%s\n' "tikl v${TIKL_VERSION} is necessary for tests."; \
-		printf '%s\n' "Set TIKL or run 'make tikl-local-install'"; \
+		printf '%s\n' "Set TIKL or run 'make tikl-fetch-build'"; \
 		exit 1; \
 	fi
 
@@ -139,4 +139,4 @@ DEPS=	$(shell find . -name '*.d')
 DEPS!=	touch version.d && find . -name '*.d'
 include ${DEPS}
 
-.PHONY: all clean distclean format install coverage tikl-local-install tikl-check test
+.PHONY: all clean distclean format install coverage tikl-fetch-build tikl-check test
