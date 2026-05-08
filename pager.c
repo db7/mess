@@ -165,6 +165,7 @@ parent_run_(pid_t child_pid, int master_fd, int tty_fd, int parse_flags)
 
     int err    = -1;
     int status = 0;
+    bool first = true;
 
     while (true) {
         int rv = waitpid(child_pid, &status, WNOHANG);
@@ -174,6 +175,14 @@ parent_run_(pid_t child_pid, int master_fd, int tty_fd, int parse_flags)
         FD_ZERO(&readfds);
         FD_SET(tty_fd, &readfds);
         FD_SET(master_fd, &readfds);
+
+        for (; first; first = false) {
+            const char ctrl_l = '\f';
+            if (write(master_fd, &ctrl_l, 1) == -1) {
+                perror("write Ctrl-L");
+                goto out;
+            }
+        }
 
         int sel = select(max_fd + 1, &readfds, NULL, NULL, NULL);
         if (sel == -1) {
