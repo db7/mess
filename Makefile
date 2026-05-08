@@ -85,10 +85,14 @@ tests/unit-links.bin:	tests/unit-links.o links.o ansi.o strbuf.o
 	${CC} -o $@ tests/unit-links.o links.o ansi.o strbuf.o ${LDFLAGS}
 tests/unit-styler.bin:	tests/unit-styler.o styler.o ansi.o strbuf.o
 	${CC} -o $@ tests/unit-styler.o styler.o ansi.o strbuf.o ${LDFLAGS}
-tests/unit-offscr.bin:	tests/unit-offscr.o links.o offscr.o readq.o uri.o ansi.o strbuf.o log.o
-	${CC} -o $@ tests/unit-offscr.o links.o offscr.o readq.o uri.o ansi.o strbuf.o log.o ${LDFLAGS}
+
+tests/unit-offscr.bin:	tests/unit-offscr.o links.o offscr.o readq.o uri.o
+tests/unit-offscr.bin:	ansi.o strbuf.o log.o
+	${CC} -o $@ tests/unit-offscr.o links.o offscr.o readq.o uri.o ansi.o \
+			strbuf.o log.o ${LDFLAGS}
 tests/run-links.bin:	tests/run-links.o links.o offscr.o ansi.o strbuf.o log.o
-	${CC} -o $@ tests/run-links.o links.o offscr.o ansi.o strbuf.o log.o ${LDFLAGS}
+	${CC} -o $@ tests/run-links.o links.o offscr.o ansi.o strbuf.o log.o \
+		${LDFLAGS}
 tests/run-offscr.bin:	tests/run-offscr.o offscr.o ansi.o strbuf.o log.o
 	${CC} -o $@ tests/run-offscr.o offscr.o ansi.o strbuf.o log.o ${LDFLAGS}
 
@@ -96,10 +100,41 @@ tests/run-offscr.bin:	tests/run-offscr.o offscr.o ansi.o strbuf.o log.o
 .o.bin:
 	${CC} -o $@ $< ${LDFLAGS}
 
-test: all
-	@tikl -q -c tests/tikl.conf ${SRCS.test}
+# ------------------------------------------------------------------------------
+# tikl tests
+# ------------------------------------------------------------------------------
+
+TIKL_VERSION=	0.4.2
+TIKL_REPO=	https://github.com/db7/tikl
+TIKL_URL=	${TIKL_REPO}/archive/refs/tags/v${TIKL_VERSION}.tar.gz
+TIKL_SHA256=	24cb5e84fea331dbfd26acae2826850b45ff7c294c6b166b56c73f7d49b6358e
+TIKL=		tikl
+
+TIKL_ENSURE_=	scripts/ensure-cmd.sh --workdir deps --candidate ${TIKL}
+TIKL_FIND_=	${TIKL_ENSURE_} -q tikl ${TIKL_VERSION}
+TIKL_INSTALL_=	${TIKL_ENSURE_} --url ${TIKL_URL} --sha256 ${TIKL_SHA256} \
+			tikl ${TIKL_VERSION}
+
+TIKL_CMD=	$(shell ${TIKL_FIND_})
+TIKL_CMD!=	${TIKL_FIND_}
+
+
+tikl-local-install:
+	@${TIKL_INSTALL_}
+
+tikl-check:
+	@if [ -z "${TIKL_CMD}" ]; then \
+		printf '%s\n' "tikl v${TIKL_VERSION} is necessary for tests."; \
+		printf '%s\n' "Set TIKL or run 'make tikl-local-install'"; \
+		exit 1; \
+	fi
+
+test: tikl-check all
+	@${TIKL_CMD} -q -c tests/tikl.conf ${SRCS.test}
 
 # ------------------------------------------------------------------------------
 DEPS=	$(shell find . -name '*.d')
 DEPS!=	touch version.d && find . -name '*.d'
 include ${DEPS}
+
+.PHONY: all clean distclean format install coverage tikl-local-install tikl-check test

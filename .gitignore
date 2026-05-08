@@ -1,4 +1,5 @@
 compile_flags.txt
+deps/
 *.bin
 *.dSYM
 *.orig
