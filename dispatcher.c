@@ -216,7 +216,7 @@ build_cmd_(const char *env, const char *fallback, wordexp_t *we)
         candidates[0] = env;
     candidates[1] = fallback;
     if (fallback && strcmp(fallback, "mdcat") == 0)
-        candidates[2] = "lowdown -tterm --term-no-links";
+        candidates[2] = "lowdown -tterm --term-no-links --term-width=100";
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
         const char *cmd = candidates[i];
         if (!cmd || !*cmd)
